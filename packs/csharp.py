@@ -333,6 +333,23 @@ public static string BuildUrl(string basePath, Dictionary<string, string> query)
 }
 ''', r'''BuildUrl("/search", {q: "code race"}) => /search?q=code%20race'''),
 
+    ("easy", "math", r"""
+public static int SumTo(int n)
+{
+    return Enumerable.Range(1, n).Sum();
+}
+""", r"""SumTo(10) => 55"""),
+    ("easy", "data-structures", r"""
+public static string? MostCommon(IEnumerable<string> items)
+{
+    return items
+        .GroupBy(item => item)
+        .OrderByDescending(group => group.Count())
+        .Select(group => group.Key)
+        .FirstOrDefault();
+}
+""", r"""MostCommon(["a", "b", "a"]) => a"""),
+
     # ------------------------------------------------------------------- medium
     ("medium", "algorithms", r'''
 public static int BinarySearch(int[] items, int target)
@@ -645,6 +662,31 @@ public static Dictionary<TKey, int> Frequencies<T, TKey>(
         .ToDictionary(group => group.Key, group => group.Count());
 }
 ''', r'''Frequencies(["a", "b", "a"], s => s) => {a: 2, b: 1}'''),
+
+    ("medium", "strings", r"""
+public static string Template(string text, IDictionary<string, object> values)
+{
+    return Regex.Replace(text, @"\{(\w+)\}", match =>
+        values.TryGetValue(match.Groups[1].Value, out var value)
+            ? value.ToString() ?? string.Empty
+            : match.Value);
+}
+""", r"""Template("hi {name}", {name: "ada"}) => hi ada"""),
+    ("medium", "functional", r"""
+public static IEnumerable<T> DistinctBy2<T, TKey>(
+    IEnumerable<T> items,
+    Func<T, TKey> key)
+{
+    var seen = new HashSet<TKey>();
+    foreach (var item in items)
+    {
+        if (seen.Add(key(item)))
+        {
+            yield return item;
+        }
+    }
+}
+""", r"""DistinctBy2(races, r => r.Language) => one race per language"""),
 
     # --------------------------------------------------------------------- hard
     ("hard", "data-structures", r'''
