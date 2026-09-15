@@ -305,7 +305,10 @@ layout does not jump when one appears.
 | `outputs.py` | demo transcripts for the simulated run panel |
 | `tools/make_assets.py` | regenerates the OG card and icons |
 | `tools/import_bot_avatars.py` | imports bot artwork from a zip or folder |
-| `deploy/nginx.conf` | reverse proxy with TLS, WebSocket upgrade and static caching |
+| `deploy/nginx-coderace.conf` | vhost for the primary domain: TLS, WebSocket upgrade, caching |
+| `deploy/nginx-typing.conf` | the same vhost for the second domain |
+| `deploy/nginx-typing-redirect.conf` | use instead, to 301 the second domain at the first |
+| `tools/make_nginx.py` | fills the templates in, into gitignored `deploy/local/` |
 
 ## API
 
@@ -472,8 +475,17 @@ now, so a single missing element warns instead of aborting the rest of the scrip
 
 ### Reverse proxy
 
-`deploy/nginx.conf` is a working config with placeholders for the domain and the
-container's address. The parts that matter:
+One self-contained vhost file per domain in `deploy/`, with placeholders for the domain and
+the container's address. Fill them in with:
+
+```bash
+python tools/make_nginx.py --primary coderace.example.com     --second typing.example.com --backend 10.0.0.5:8000
+```
+
+That writes ready-to-paste files into `deploy/local/`, which is gitignored so the backend
+address stays out of the repository. Paste one per vhost, then `nginx -t` and reload.
+
+The parts that matter:
 
 - A dedicated `location /ws/` block carrying `proxy_http_version 1.1`, `Upgrade` and
   `Connection "upgrade"`. Without them `/ws/{code}` arrives as an ordinary GET, which a

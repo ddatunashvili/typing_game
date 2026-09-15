@@ -6,3 +6,6 @@ venv/
 
 # local tooling input, not part of the app
 *.zip
+
+# generated nginx configs with the real backend address
+deploy/local/
