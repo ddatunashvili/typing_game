@@ -44,7 +44,12 @@ SETTING_DEFAULTS = {
     "playlist_size": "12",
 }
 
-_cache: Dict[str, object] = {"snippets": None, "config": {}, "at": 0.0}
+_cache: Dict[str, object] = {
+    "snippets": None,
+    "config": {},
+    "topics": [],
+    "at": 0.0,
+}
 
 
 def _env_default(name: str, fallback: str) -> str:
@@ -82,9 +87,48 @@ def refresh(force: bool = False) -> None:
         if pool:
             _cache["snippets"] = pool
         _cache["config"] = db.load_config()
+        # topics players created show up as filter options too
+        import social
+
+        _cache["topics"] = social.custom_topics()
         _cache["at"] = time.time()
     except Exception as exc:
         log.warning("library refresh failed, using the last copy: %s", exc)
+
+
+def extra_topics() -> List[dict]:
+    refresh()
+    return list(_cache.get("topics") or [])  # type: ignore[arg-type]
+
+
+def all_topics() -> List[dict]:
+    """Built-in topics first, then player-created ones."""
+    return topics() + [t for t in extra_topics() if t["id"] not in set(TOPIC_IDS)]
+
+
+def topic_ids() -> List[str]:
+    return [t["id"] for t in all_topics()]
+
+
+def invalidate() -> None:
+    """Mark the cache stale so the next read re-loads it.
+
+    Cheaper than refresh(True): a submission should not block on re-reading the
+    whole library, it only has to make sure the next reader sees the change.
+    """
+    _cache["at"] = 0.0
+
+
+def refresh_topics() -> None:
+    """Re-read only the topic table, for when a new one must exist right now."""
+    if not db.enabled():
+        return
+    try:
+        import social
+
+        _cache["topics"] = social.custom_topics()
+    except Exception as exc:
+        log.warning("topic refresh failed: %s", exc)
 
 
 def all_snippets() -> Dict[str, List[dict]]:
@@ -135,7 +179,7 @@ def pool_for(
     if level:
         levels_filter = [level]
     wanted_levels = set(clean_ids(levels_filter, LEVEL_IDS))
-    wanted_topics = set(clean_ids(topics_filter, TOPIC_IDS))
+    wanted_topics = set(clean_ids(topics_filter, topic_ids()))
     matches = [
         s
         for s in pool
@@ -181,7 +225,7 @@ class Bag:
         key = (
             language,
             tuple(clean_ids(levels_filter, LEVEL_IDS)),
-            tuple(clean_ids(topics_filter, TOPIC_IDS)),
+            tuple(clean_ids(topics_filter, topic_ids())),
             level or "",
         )
         if key != self._key or not self._queue:
@@ -242,7 +286,7 @@ def count_matching(
     if level:
         levels_filter = [level]
     wanted_levels = set(clean_ids(levels_filter, LEVEL_IDS))
-    wanted_topics = set(clean_ids(topics_filter, TOPIC_IDS))
+    wanted_topics = set(clean_ids(topics_filter, topic_ids()))
     return sum(
         1
         for s in pool
@@ -257,14 +301,14 @@ def catalog() -> List[dict]:
     out = []
     for lid, label in LANGUAGES:
         pool = library.get(lid, [])
+        known = topic_ids()
         by_level = {level: 0 for level in LEVEL_IDS}
-        by_topic = {topic: 0 for topic in TOPIC_IDS}
+        by_topic = {topic: 0 for topic in known}
         combos: Dict[str, int] = {}
         for s in pool:
             if s["level"] in by_level:
                 by_level[s["level"]] += 1
-            if s["topic"] in by_topic:
-                by_topic[s["topic"]] += 1
+            by_topic[s["topic"]] = by_topic.get(s["topic"], 0) + 1
             key = s["level"] + "|" + s["topic"]
             combos[key] = combos.get(key, 0) + 1
         out.append(

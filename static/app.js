@@ -913,6 +913,7 @@
     }
     paintProfile();
     if (S.accounts) loadLeaderboard();
+    if (S.me) startHeartbeat();
   }
 
   async function loadLeaderboard() {
@@ -1692,6 +1693,10 @@
     stopRace();
     hideRun();
     el.ranks.classList.add("hidden");
+    for (const id of ["screen-feed", "screen-players", "screen-user", "screen-snippets"]) {
+      const node = document.getElementById(id);
+      if (node) node.classList.add("hidden");
+    }
     if (el.ghosts) el.ghosts.innerHTML = "";
     el.home.classList.remove("hidden");
     el.room.classList.add("hidden");
@@ -1704,6 +1709,10 @@
 
   function showRoom() {
     el.ranks.classList.add("hidden");
+    for (const id of ["screen-feed", "screen-players", "screen-user", "screen-snippets"]) {
+      const node = document.getElementById(id);
+      if (node) node.classList.add("hidden");
+    }
     el.hudSnipsBox.classList.toggle("hidden", !R.timed);
     el.homeErr.textContent = "";
     el.home.classList.add("hidden");
@@ -1901,6 +1910,11 @@
   on(el.leave, "click", leave);
 
   on(el.profileBtn, "click", openProfile);
+  on(el.profileAvatar, "click", (e) => {
+    if (!S.me) return;
+    e.stopPropagation();
+    showUser(S.me.id);
+  });
   on(el.brand, "click", (e) => {
     e.preventDefault();
     hideRanks();
@@ -2045,6 +2059,810 @@
     if (e.key === "Escape" && !el.winModal.classList.contains("hidden")) hideOutcome();
     if (e.key === "Escape" && !el.ranks.classList.contains("hidden")) hideRanks();
   });
+
+  /* ==================== social layer ==================== */
+
+  const SOCIAL = {
+    feedBefore: 0,
+    playersTimer: 0,
+    beatTimer: 0,
+    report: null,        // {kind, id, label}
+    shownChallenges: new Set(),
+    viewing: 0,          // profile being looked at
+  };
+
+  function el2(id) {
+    return document.getElementById(id);
+  }
+
+  function ago(stamp) {
+    if (!stamp) return "";
+    const then = Date.parse(stamp.replace(" ", "T") + "Z");
+    if (Number.isNaN(then)) return "";
+    const secs = Math.max(0, (Date.now() - then) / 1000);
+    if (secs < 60) return "just now";
+    if (secs < 3600) return Math.floor(secs / 60) + "m ago";
+    if (secs < 86400) return Math.floor(secs / 3600) + "h ago";
+    return Math.floor(secs / 86400) + "d ago";
+  }
+
+  function idleText(seconds) {
+    if (seconds <= 60) return "online now";
+    if (seconds <= 300) return Math.floor(seconds / 60) + "m idle";
+    if (seconds > 86400 * 365) return "not seen";
+    return "last seen " + ago(new Date(Date.now() - seconds * 1000).toISOString());
+  }
+
+  function screenOnly(node) {
+    for (const s of [el.home, el.room, el.ranks, el2("screen-feed"),
+                     el2("screen-players"), el2("screen-user"),
+                     el2("screen-snippets")]) {
+      if (s) s.classList.toggle("hidden", s !== node);
+    }
+    clearInterval(S.ranksTimer);
+    clearInterval(SOCIAL.playersTimer);
+  }
+
+  function backToGame() {
+    screenOnly(S.room ? el.room : el.home);
+  }
+
+  /* ---------- posts ---------- */
+  function postCard(post) {
+    const card = document.createElement("article");
+    card.className = "post" + (post.mine ? " mine" : "");
+    card.dataset.id = post.id;
+
+    const won = post.place === 1;
+    const head = document.createElement("div");
+    head.className = "post-head";
+    head.innerHTML =
+      '<span class="avatar sm"></span>' +
+      '<button class="post-who link" type="button"></button>' +
+      '<span class="rate sm"></span>' +
+      '<span class="post-when muted"></span>';
+    paintAvatar(head.querySelector(".avatar"), post.user);
+    head.querySelector(".post-who").textContent = post.user.name;
+    head.querySelector(".post-who").onclick = () => showUser(post.user.id);
+    head.querySelector(".rate").textContent = post.user.rating;
+    head.querySelector(".rate").title = post.user.rank;
+    head.querySelector(".post-when").textContent = ago(post.created_at);
+
+    const body = document.createElement("div");
+    body.className = "post-body";
+    const label = post.kind === "solo" ? "solo run" : won ? "won a race" : "raced";
+    const bits = [
+      '<b>' + Math.round(post.wpm) + "</b> wpm",
+      Math.round(post.acc) + "% acc",
+      escapeHtml(post.language || "") +
+        (post.level ? " &middot; " + escapeHtml(post.level) : ""),
+    ];
+    if (post.place) bits.push("#" + post.place);
+    if (post.delta) {
+      bits.push(
+        '<span class="' + (post.delta > 0 ? "up" : "down") + '">' +
+          (post.delta > 0 ? "+" : "") + post.delta + "</span>"
+      );
+    }
+    body.innerHTML =
+      '<span class="post-label">' + label + "</span>" +
+      '<span class="post-stats">' + bits.join(" &middot; ") + "</span>" +
+      '<span class="stars">' + starsHtml(post.stars) + "</span>";
+    if (post.opponents) {
+      const vs = document.createElement("p");
+      vs.className = "post-vs muted";
+      vs.textContent = "against " + post.opponents;
+      body.appendChild(vs);
+    }
+
+    const bar = document.createElement("div");
+    bar.className = "post-bar";
+    bar.innerHTML =
+      '<button class="react up-btn" type="button">&#9650; <b></b></button>' +
+      '<button class="react down-btn" type="button">&#9660; <b></b></button>' +
+      '<button class="react talk-btn" type="button">comments <b></b></button>' +
+      '<span class="post-grow"></span>' +
+      '<button class="react flag-btn" type="button">report</button>' +
+      (post.mine ? '<button class="react del-btn" type="button">delete</button>' : "");
+
+    const up = bar.querySelector(".up-btn");
+    const down = bar.querySelector(".down-btn");
+    up.querySelector("b").textContent = post.likes;
+    down.querySelector("b").textContent = post.dislikes;
+    bar.querySelector(".talk-btn b").textContent = post.comments;
+    up.classList.toggle("on", post.my_reaction === 1);
+    down.classList.toggle("on", post.my_reaction === -1);
+
+    const talk = document.createElement("div");
+    talk.className = "post-talk hidden";
+    talk.innerHTML =
+      '<div class="comments"></div>' +
+      '<form class="comment-form">' +
+      '<input maxlength="500" placeholder="say something…" />' +
+      "<button type=\"submit\">post</button></form>";
+
+    up.onclick = () => sendReaction(post, card, post.my_reaction === 1 ? 0 : 1);
+    down.onclick = () => sendReaction(post, card, post.my_reaction === -1 ? 0 : -1);
+    bar.querySelector(".talk-btn").onclick = () => {
+      talk.classList.toggle("hidden");
+      if (!talk.classList.contains("hidden")) loadComments(post.id, talk);
+    };
+    bar.querySelector(".flag-btn").onclick = () =>
+      openReport("post", post.id, "this race post");
+    const del = bar.querySelector(".del-btn");
+    if (del) del.onclick = () => deletePost(post.id, card);
+
+    talk.querySelector(".comment-form").onsubmit = (e) => {
+      e.preventDefault();
+      const input = talk.querySelector("input");
+      const text = input.value.trim();
+      if (!text) return;
+      sendComment(post.id, text, talk, bar);
+      input.value = "";
+    };
+
+    card.append(head, body, bar, talk);
+    return card;
+  }
+
+  async function sendReaction(post, card, value) {
+    if (!S.me) return;
+    try {
+      const res = await fetch("/api/posts/" + post.id + "/react", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ value }),
+      });
+      if (!res.ok) return;
+      const d = await res.json();
+      post.likes = d.likes;
+      post.dislikes = d.dislikes;
+      post.my_reaction = d.my_reaction;
+      card.querySelector(".up-btn b").textContent = d.likes;
+      card.querySelector(".down-btn b").textContent = d.dislikes;
+      card.querySelector(".up-btn").classList.toggle("on", d.my_reaction === 1);
+      card.querySelector(".down-btn").classList.toggle("on", d.my_reaction === -1);
+    } catch (err) {
+      /* a lost vote is not worth shouting about */
+    }
+  }
+
+  function commentRow(comment) {
+    const row = document.createElement("div");
+    row.className = "comment";
+    row.innerHTML =
+      '<span class="avatar sm"></span>' +
+      '<button class="comment-who link" type="button"></button>' +
+      '<span class="comment-body"></span>' +
+      '<span class="comment-when muted"></span>' +
+      '<button class="comment-flag link" type="button">report</button>';
+    paintAvatar(row.querySelector(".avatar"), comment.user);
+    row.querySelector(".comment-who").textContent = comment.user.name;
+    row.querySelector(".comment-who").onclick = () => showUser(comment.user.id);
+    row.querySelector(".comment-body").textContent = comment.body;
+    row.querySelector(".comment-when").textContent = ago(comment.created_at);
+    row.querySelector(".comment-flag").onclick = () =>
+      openReport("comment", comment.id, "this comment");
+
+    if (S.me && S.me.id === comment.user.id) {
+      const del = document.createElement("button");
+      del.className = "comment-flag link";
+      del.type = "button";
+      del.textContent = "delete";
+      del.onclick = async () => {
+        await fetch("/api/comments/" + comment.id, {
+          method: "DELETE",
+          credentials: "same-origin",
+        });
+        row.remove();
+      };
+      row.appendChild(del);
+    }
+    return row;
+  }
+
+  function paintComments(list, rows) {
+    list.innerHTML = "";
+    if (!rows.length) {
+      const empty = document.createElement("p");
+      empty.className = "muted";
+      empty.textContent = "No comments yet.";
+      list.appendChild(empty);
+      return;
+    }
+    for (const comment of rows) list.appendChild(commentRow(comment));
+  }
+
+  async function loadComments(postId, talk) {
+    const list = talk.querySelector(".comments");
+    list.innerHTML = '<p class="muted">loading…</p>';
+    try {
+      const res = await fetch("/api/posts/" + postId + "/comments");
+      const d = await res.json();
+      paintComments(list, d.comments || []);
+    } catch (err) {
+      list.innerHTML = '<p class="err">could not load the comments</p>';
+    }
+  }
+
+  async function sendComment(postId, text, talk, bar) {
+    try {
+      const res = await fetch("/api/posts/" + postId + "/comments", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ body: text }),
+      });
+      const d = await res.json();
+      if (!res.ok) {
+        const list = talk.querySelector(".comments");
+        list.innerHTML =
+          '<p class="err">' +
+          (d.error === "rate_limited"
+            ? "too many comments this hour, give it a rest"
+            : d.error === "not_registered"
+            ? "you need a profile to comment"
+            : "could not post that") +
+          "</p>";
+        return;
+      }
+      paintComments(talk.querySelector(".comments"), d.comments || []);
+      bar.querySelector(".talk-btn b").textContent = (d.comments || []).length;
+    } catch (err) {
+      /* ignore */
+    }
+  }
+
+  async function deletePost(postId, card) {
+    try {
+      const res = await fetch("/api/posts/" + postId, {
+        method: "DELETE",
+        credentials: "same-origin",
+      });
+      if (res.ok) card.remove();
+    } catch (err) {
+      /* ignore */
+    }
+  }
+
+  /* ---------- feed ---------- */
+  async function loadFeed(append) {
+    const list = el2("feedList");
+    const more = el2("feedMore");
+    if (!append) {
+      SOCIAL.feedBefore = 0;
+      list.innerHTML = '<p class="muted">loading…</p>';
+    }
+    try {
+      const qs = SOCIAL.feedBefore ? "?before=" + SOCIAL.feedBefore : "";
+      const res = await fetch("/api/feed" + qs, { credentials: "same-origin" });
+      const d = await res.json();
+      const posts = d.posts || [];
+      if (!append) list.innerHTML = "";
+      for (const post of posts) list.appendChild(postCard(post));
+      if (posts.length) SOCIAL.feedBefore = posts[posts.length - 1].id;
+      el2("feedEmpty").classList.toggle("hidden", list.children.length > 0);
+      more.classList.toggle("hidden", posts.length < 30);
+    } catch (err) {
+      list.innerHTML = '<p class="err">could not load the feed</p>';
+    }
+  }
+
+  function showFeed() {
+    screenOnly(el2("screen-feed"));
+    loadFeed(false);
+  }
+
+  /* ---------- public profile ---------- */
+  async function showUser(userId) {
+    SOCIAL.viewing = userId;
+    screenOnly(el2("screen-user"));
+    el2("userName").textContent = "";
+    el2("userPosts").innerHTML = '<p class="muted">loading…</p>';
+
+    try {
+      const res = await fetch("/api/profile/" + userId, { credentials: "same-origin" });
+      if (!res.ok) {
+        el2("userPosts").innerHTML = '<p class="err">no such player</p>';
+        return;
+      }
+      const d = await res.json();
+      const p = d.profile;
+
+      el2("userTitle").textContent = d.me ? "Your profile" : "Profile";
+      el2("userName").textContent = p.name;
+      el2("userRank").textContent = p.rank + " · " + p.rating;
+      el2("userSeen").textContent =
+        (p.online ? "online now" : idleText(p.idle)) +
+        (p.joined ? " · joined " + p.joined.slice(0, 10) : "");
+      paintAvatar(el2("userAvatar"), p);
+
+      const stats = [
+        ["races", p.races],
+        ["wins", p.wins],
+        ["best wpm", Math.round(p.best_wpm)],
+        ["avg wpm", Math.round(p.avg_wpm)],
+        ["avg acc", Math.round(p.avg_acc) + "%"],
+        ["stars", p.stars],
+        ["snippets", p.snippets],
+      ];
+      el2("userStats").innerHTML = stats
+        .map((s) => "<div><b>" + s[1] + "</b><span>" + s[0] + "</span></div>")
+        .join("");
+
+      el2("userLangs").innerHTML = (p.by_language || [])
+        .map(
+          (row) =>
+            '<span class="chip"><span class="chip-label">' +
+            escapeHtml(row.language) +
+            '</span><span class="chip-n">' +
+            row.races +
+            "</span></span>"
+        )
+        .join("");
+
+      const canAct = !!S.me && !d.me;
+      el2("userChallenge").classList.toggle("hidden", !canAct);
+      el2("userReport").classList.toggle("hidden", !canAct);
+      el2("userChallenge").onclick = () => challengePlayer(userId, p.name);
+      el2("userReport").onclick = () => openReport("user", userId, p.name);
+
+      const posts = el2("userPosts");
+      posts.innerHTML = "";
+      for (const post of d.posts || []) posts.appendChild(postCard(post));
+      el2("userNoPosts").classList.toggle("hidden", (d.posts || []).length > 0);
+    } catch (err) {
+      el2("userPosts").innerHTML = '<p class="err">could not load that profile</p>';
+    }
+  }
+
+  /* ---------- find players ---------- */
+  function playerRow(p) {
+    const row = document.createElement("div");
+    row.className = "rank-row" + (p.me ? " me" : "");
+    row.innerHTML =
+      '<span class="dotc"></span><span class="avatar sm"></span>' +
+      '<button class="rk-name link" type="button"></button>' +
+      '<span class="rk-title muted"></span>' +
+      '<b class="rk-rate"></b>' +
+      '<span class="rk-act"></span>';
+    paintAvatar(row.querySelector(".avatar"), p);
+    row.querySelector(".dotc").style.background = p.online
+      ? "var(--accent)"
+      : "var(--dim)";
+    row.querySelector(".dotc").title = p.online ? "online" : idleText(p.idle);
+    const name = row.querySelector(".rk-name");
+    name.textContent = p.name;
+    name.onclick = () => showUser(p.id);
+    row.querySelector(".rk-title").textContent =
+      p.rank + (p.racing ? " · in a race" : p.online ? "" : " · " + idleText(p.idle));
+    row.querySelector(".rk-rate").textContent = p.rating;
+
+    if (!p.me && S.me) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "ghost";
+      btn.textContent = "Challenge";
+      btn.onclick = () => challengePlayer(p.id, p.name, btn);
+      row.querySelector(".rk-act").appendChild(btn);
+    }
+    return row;
+  }
+
+  async function loadPlayers() {
+    const list = el2("playersList");
+    try {
+      const res = await fetch("/api/players", { credentials: "same-origin" });
+      const d = await res.json();
+      const rows = (d.players || []).filter((p) => p.online || p.races > 0);
+      list.innerHTML = "";
+      for (const p of rows) list.appendChild(playerRow(p));
+      el2("playersCount").textContent =
+        rows.filter((p) => p.online).length + " online";
+      el2("playersEmpty").classList.toggle("hidden", rows.length > 0);
+    } catch (err) {
+      list.innerHTML = '<p class="err">could not load the player list</p>';
+    }
+    loadChallenges();
+  }
+
+  function showPlayers() {
+    screenOnly(el2("screen-players"));
+    loadPlayers();
+    clearInterval(SOCIAL.playersTimer);
+    SOCIAL.playersTimer = setInterval(() => {
+      if (!el2("screen-players").classList.contains("hidden")) loadPlayers();
+      else clearInterval(SOCIAL.playersTimer);
+    }, 15000);
+  }
+
+  /* ---------- challenges ---------- */
+  async function challengePlayer(userId, name, btn) {
+    if (!S.me) return;
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "inviting…";
+    }
+    try {
+      const res = await fetch("/api/challenge", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          to: userId,
+          lang: (el2("chLang") && el2("chLang").value) || S.lang,
+          levels: S.levels.join(","),
+          topics: S.topics.join(","),
+          duration: parseInt((el2("chDuration") && el2("chDuration").value) || "0", 10),
+        }),
+      });
+      const d = await res.json();
+      if (!res.ok) {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = "Challenge";
+        }
+        return;
+      }
+      if (btn) btn.textContent = "waiting…";
+      // the challenger waits in the lobby they just opened
+      S.solo = false;
+      connect(d.code, true);
+    } catch (err) {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "Challenge";
+      }
+    }
+  }
+
+  function challengeRow(c, incoming) {
+    const row = document.createElement("div");
+    row.className = "ch-row";
+    row.innerHTML =
+      '<span class="avatar sm"></span>' +
+      '<span class="ch-text"></span>' +
+      '<span class="post-grow"></span>' +
+      '<span class="ch-act"></span>';
+    paintAvatar(row.querySelector(".avatar"), c.other);
+    const when = c.duration ? c.duration + "s" : "one snippet";
+    row.querySelector(".ch-text").textContent =
+      (incoming ? c.other.name + " challenged you" : "waiting for " + c.other.name) +
+      " · " + (c.language || "python") + " · " + when;
+
+    const act = row.querySelector(".ch-act");
+    if (incoming) {
+      const yes = document.createElement("button");
+      yes.className = "accent";
+      yes.type = "button";
+      yes.textContent = "Accept";
+      yes.onclick = () => answerChallenge(c, "accept");
+      const no = document.createElement("button");
+      no.className = "ghost";
+      no.type = "button";
+      no.textContent = "Decline";
+      no.onclick = () => answerChallenge(c, "decline");
+      act.append(yes, no);
+    } else {
+      const tag = document.createElement("span");
+      tag.className = "muted";
+      tag.textContent = c.status;
+      act.appendChild(tag);
+    }
+    return row;
+  }
+
+  async function answerChallenge(c, action) {
+    try {
+      const res = await fetch("/api/challenges/" + c.id + "/" + action, {
+        method: "POST",
+        credentials: "same-origin",
+      });
+      const d = await res.json();
+      hideChallengeToast();
+      if (action === "accept") {
+        if (!res.ok) {
+          if (d.error === "lobby_gone") alertLine("that lobby has already closed");
+          return;
+        }
+        S.solo = false;
+        connect(d.lobby, false);
+      } else {
+        loadChallenges();
+      }
+    } catch (err) {
+      /* ignore */
+    }
+  }
+
+  function alertLine(text) {
+    el.homeErr.textContent = text;
+  }
+
+  async function loadChallenges() {
+    if (!S.me) return;
+    try {
+      const res = await fetch("/api/challenges", { credentials: "same-origin" });
+      const d = await res.json();
+      paintChallenges(d);
+    } catch (err) {
+      /* ignore */
+    }
+  }
+
+  function paintChallenges(d) {
+    const incoming = d.incoming || [];
+    const outgoing = d.outgoing || [];
+    const panel = el2("chPanel");
+    const list = el2("chList");
+    if (panel && list) {
+      list.innerHTML = "";
+      for (const c of incoming) list.appendChild(challengeRow(c, true));
+      for (const c of outgoing) list.appendChild(challengeRow(c, false));
+      panel.classList.toggle("hidden", incoming.length + outgoing.length === 0);
+    }
+
+    const badge = el2("chBadge");
+    if (badge) {
+      badge.textContent = incoming.length;
+      badge.classList.toggle("hidden", incoming.length === 0);
+    }
+
+    // pop a toast for anything we have not shown yet
+    for (const c of incoming) {
+      if (SOCIAL.shownChallenges.has(c.id)) continue;
+      SOCIAL.shownChallenges.add(c.id);
+      showChallengeToast(c);
+      break;
+    }
+  }
+
+  function showChallengeToast(c) {
+    const toast = el2("chToast");
+    if (!toast) return;
+    paintAvatar(el2("chToastAvatar"), c.other);
+    el2("chToastText").textContent =
+      c.other.name + " (" + c.other.rating + ") challenged you";
+    el2("chToastAccept").onclick = () => answerChallenge(c, "accept");
+    el2("chToastDecline").onclick = () => answerChallenge(c, "decline");
+    toast.classList.remove("hidden");
+  }
+
+  function hideChallengeToast() {
+    const toast = el2("chToast");
+    if (toast) toast.classList.add("hidden");
+  }
+
+  function startHeartbeat() {
+    clearInterval(SOCIAL.beatTimer);
+    const beat = async () => {
+      if (!S.me) return;
+      try {
+        const res = await fetch("/api/heartbeat", {
+          method: "POST",
+          credentials: "same-origin",
+        });
+        const d = await res.json();
+        if (d.challenges) paintChallenges(d.challenges);
+      } catch (err) {
+        /* ignore */
+      }
+    };
+    beat();
+    SOCIAL.beatTimer = setInterval(beat, 20000);
+  }
+
+  /* ---------- reports ---------- */
+  function openReport(kind, id, label) {
+    if (!S.me) return;
+    SOCIAL.report = { kind, id, label };
+    el2("reportTitle").textContent = "Report " + label;
+    el2("reportNote").value = "";
+    el2("reportErr").textContent = "";
+    el2("reportModal").classList.remove("hidden");
+  }
+
+  function closeReport() {
+    el2("reportModal").classList.add("hidden");
+    SOCIAL.report = null;
+  }
+
+  async function sendReport() {
+    if (!SOCIAL.report) return;
+    const btn = el2("reportSend");
+    btn.disabled = true;
+    try {
+      const res = await fetch("/api/report", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          kind: SOCIAL.report.kind,
+          id: SOCIAL.report.id,
+          reason: el2("reportReason").value,
+          note: el2("reportNote").value,
+        }),
+      });
+      const d = await res.json();
+      if (!res.ok) {
+        el2("reportErr").textContent = d.error || "could not send that";
+        return;
+      }
+      closeReport();
+      alertLine(
+        d.hidden
+          ? "reported — that has now been hidden"
+          : "reported (" + d.reports + " of " + d.threshold + ")"
+      );
+    } catch (err) {
+      el2("reportErr").textContent = "network error";
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  /* ---------- my snippets ---------- */
+  function fillSelect(node, rows, value) {
+    node.innerHTML = "";
+    for (const row of rows) {
+      const opt = document.createElement("option");
+      opt.value = row.id;
+      opt.textContent = row.label + (row.custom ? " (yours)" : "");
+      node.appendChild(opt);
+    }
+    if (value) node.value = value;
+  }
+
+  function showSnippets() {
+    screenOnly(el2("screen-snippets"));
+    if (S.meta) {
+      fillSelect(el2("snipLang"), S.meta.languages, S.lang);
+      fillSelect(el2("snipLevel"), S.meta.levels, "easy");
+      fillSelect(el2("snipTopic"), S.meta.topics, "algorithms");
+    }
+    loadMySnippets();
+  }
+
+  async function loadMySnippets() {
+    const list = el2("snipList");
+    if (!S.me) {
+      list.innerHTML = '<p class="muted">you need a profile first</p>';
+      return;
+    }
+    list.innerHTML = '<p class="muted">loading…</p>';
+    try {
+      const res = await fetch("/api/snippets/mine", { credentials: "same-origin" });
+      const d = await res.json();
+      const rows = d.snippets || [];
+      list.innerHTML = "";
+      for (const row of rows) list.appendChild(snippetRow(row));
+      el2("snipCount").textContent = rows.length ? rows.length + " added" : "";
+      el2("snipEmpty").classList.toggle("hidden", rows.length > 0);
+      el2("snipQuota").textContent = "Up to " + d.per_day + " a day.";
+    } catch (err) {
+      list.innerHTML = '<p class="err">could not load your snippets</p>';
+    }
+  }
+
+  function snippetRow(row) {
+    const card = document.createElement("div");
+    card.className = "snip-card" + (row.active ? "" : " hidden-snip");
+    card.innerHTML =
+      '<div class="snip-meta">' +
+      '<span class="snip-tag"></span>' +
+      '<span class="snip-state muted"></span>' +
+      '<span class="post-grow"></span>' +
+      '<button class="react vis-btn" type="button"></button>' +
+      '<button class="react del-btn" type="button">delete</button>' +
+      "</div>" +
+      '<pre class="snip-code"></pre>';
+    card.querySelector(".snip-tag").textContent =
+      row.language + " · " + row.level + " · " + row.topic;
+    card.querySelector(".snip-state").textContent = row.active
+      ? row.status === "public"
+        ? "public"
+        : "private"
+      : "hidden after " + row.reports + " reports";
+    card.querySelector(".snip-code").textContent = row.code;
+
+    const vis = card.querySelector(".vis-btn");
+    vis.textContent = row.status === "public" ? "make private" : "publish";
+    vis.onclick = async () => {
+      vis.disabled = true;
+      await fetch("/api/snippets/" + row.id + "/status", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ public: row.status !== "public" }),
+      });
+      loadMySnippets();
+      initMeta();
+    };
+    card.querySelector(".del-btn").onclick = async () => {
+      await fetch("/api/snippets/" + row.id, {
+        method: "DELETE",
+        credentials: "same-origin",
+      });
+      loadMySnippets();
+      initMeta();
+    };
+    return card;
+  }
+
+  async function saveSnippet() {
+    const err = el2("snipErr");
+    err.textContent = "";
+    if (!S.me) {
+      err.textContent = "you need a profile first";
+      return;
+    }
+    const code = el2("snipCode").value;
+    if (code.trim().length < 20) {
+      err.textContent = "that is too short — at least 20 characters";
+      return;
+    }
+    const btn = el2("snipSave");
+    btn.disabled = true;
+    try {
+      const res = await fetch("/api/snippets", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          language: el2("snipLang").value,
+          level: el2("snipLevel").value,
+          topic: el2("snipTopic").value,
+          new_topic: el2("snipNewTopic").value.trim(),
+          code,
+          output: el2("snipOutput").value,
+          public: el2("snipPublic").checked,
+        }),
+      });
+      const d = await res.json();
+      if (!res.ok) {
+        err.textContent =
+          d.error === "duplicate"
+            ? "that snippet is already in the library"
+            : d.error === "rate_limited"
+            ? "you have hit today's limit of " + d.per_day
+            : d.error === "too_short"
+            ? "at least " + d.min + " characters"
+            : d.error === "too_long"
+            ? "keep it under " + d.max + " characters"
+            : d.error === "bad_topic"
+            ? "pick a topic or give the new one a real name"
+            : "could not save that";
+        return;
+      }
+      el2("snipCode").value = "";
+      el2("snipOutput").value = "";
+      el2("snipNewTopic").value = "";
+      err.textContent = "";
+      await initMeta();
+      fillSelect(el2("snipTopic"), S.meta.topics, d.topic);
+      loadMySnippets();
+    } catch (e) {
+      err.textContent = "network error";
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  /* ---------- wiring ---------- */
+  on(el2("feedBtn"), "click", showFeed);
+  on(el2("playersBtn"), "click", showPlayers);
+  on(el2("snippetsBtn"), "click", showSnippets);
+  on(el2("feedMore"), "click", () => loadFeed(true));
+  on(el2("snipSave"), "click", saveSnippet);
+  on(el2("reportCancel"), "click", closeReport);
+  on(el2("reportSend"), "click", sendReport);
+  on(el2("reportModal"), "click", (e) => {
+    if (e.target === el2("reportModal")) closeReport();
+  });
+  for (const b of document.querySelectorAll(".js-back")) {
+    on(b, "click", backToGame);
+  }
 
   Promise.all([initMeta(), loadMe(), loadBots()]).then(() => {
     const code = new URLSearchParams(location.search).get("l");

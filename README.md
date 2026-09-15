@@ -165,6 +165,68 @@ random while it types - first jab a few seconds in, then every 6-13 seconds, nev
 within a race. They aim at your code and the clock, not at you. Lines live in `ROASTS` in
 `bots.py`.
 
+## Your own snippets
+
+**My snippets** on the home screen. Pick a language and level, choose a topic *or type a new
+one*, paste the code and optionally the output it should print.
+
+- Public submissions join the pool everyone races; private ones stay yours. Toggle either
+  way, or delete, at any time.
+- A player-created topic becomes a real filter chip for everybody, counted in the catalog
+  like the built-in ones.
+- Guards: 20 to 4000 characters, at most **20 a day** per account, and identical code is
+  rejected as a duplicate (the hash covers language + code, so the same function in two
+  languages is two snippets).
+
+```
+POST /api/snippets  {language, level, topic | new_topic, code, output, public}
+```
+
+## Feed, reactions and comments
+
+Every finished race - solo or multiplayer - is written to the player's profile as a post
+carrying the language, level, WPM, accuracy, stars, place and rating change, plus who they
+were up against.
+
+- **Feed** in the top bar lists the newest posts, paged with *load older*.
+- Like, dislike (clicking the same one again clears your vote) and comment.
+- You can delete your own posts and comments.
+
+## Public profiles
+
+Click any name - in the feed, in a comment, on the players page - to open that player's
+profile: avatar, rank and rating, whether they are online, races, wins, best and average
+WPM, accuracy, stars, how many snippets they have contributed, a per-language breakdown,
+and their race history. Your own avatar in the top bar opens yours.
+
+## Find players and challenges
+
+**Players** lists everyone active recently, marking who is online and who is mid-race, and
+refreshes every 15 seconds.
+
+- **Challenge** opens a lobby with your chosen language and race length and invites them.
+- A 20-second heartbeat keeps you on the online list and carries invitations back, so an
+  incoming challenge pops a toast wherever you are, with Accept / Later. The nav badge
+  counts what is waiting.
+- Invitations expire after 10 minutes, and only the addressee can accept one.
+
+## Reporting and moderation
+
+Posts, comments, snippets and players can all be reported, with a reason
+(cheating / spam / abuse / broken snippet / other) and an optional note.
+
+There is no admin account, so moderation is mechanical: **three distinct reporters hide the
+target automatically** - a post or comment disappears, a snippet is deactivated and leaves
+the race pool. One player cannot report the same thing twice. Comments are capped at 500
+characters and 30 an hour per account.
+
+Two limits worth being aware of before opening this to the public: there is no human review
+queue, so the auto-hide threshold is the only check on a bad post; and because
+`IP_AUTOLOGIN` attaches a cookie-less visitor to the last account from their IP, people
+sharing a network share an account - which both weakens "report this player" and means three
+"distinct" reporters could in principle be one household. Set `IP_AUTOLOGIN=0` if that
+matters more to you than the convenience.
+
 ## Profiles
 
 Optional — the game is fully playable without them, and everything below turns itself off
@@ -234,6 +296,7 @@ layout does not jump when one appears.
 | `packs/` | per-language snippet packs; drop in a module and it is picked up |
 | `library.py` | reads snippets and settings from MySQL, falls back to the seed file |
 | `db.py` | MySQL: players, IP log, avatars, race history, snippets, settings |
+| `social.py` | submissions, topics, posts, reactions, comments, reports, challenges |
 | `static/app.js` | typing engine, per-char highlighting, filters, profile, lobby client |
 | `static/style.css` | dark theme |
 | `static/index.html` | markup + Prism component loading |
@@ -272,6 +335,20 @@ Accounts (all no-ops when no database is configured):
 - `GET /api/bot-avatar/{slug}` — bot portrait (imported artwork, else a generated identicon)
 - `GET /api/bot-card/{slug}` — the full bot character-card illustration
 - `GET /api/name-check?name=x` — is this display name free, plus suggestions if not
+
+Social:
+
+- `POST /api/snippets` — submit a snippet; `GET /api/snippets/mine`;
+  `POST /api/snippets/{id}/status`; `DELETE /api/snippets/{id}`
+- `POST /api/topics` — create a topic
+- `GET /api/feed?limit=&before=` — the race feed
+- `GET /api/profile/{id}` — a player's profile and their posts
+- `POST /api/posts/{id}/react` `{value: 1 | -1 | 0}`
+- `GET|POST /api/posts/{id}/comments`, `DELETE /api/comments/{id}`, `DELETE /api/posts/{id}`
+- `POST /api/report` `{kind, id, reason, note}`
+- `GET /api/players` — who is around; `POST /api/heartbeat` — presence + invitations
+- `POST /api/challenge` `{to, lang, levels, topics, duration}`
+- `GET /api/challenges`, `POST /api/challenges/{id}/accept|decline`
 - `POST /api/race` — record a solo result (lobby races are recorded server-side)
 
 Websocket `WS /ws/{code}?name=&pid=&create=0|1&lang=&levels=&topics=&duration=`

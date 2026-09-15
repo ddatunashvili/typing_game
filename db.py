@@ -150,6 +150,12 @@ def _exec(sql: str, args: Sequence[Any] = ()) -> int:
             return cur.lastrowid or cur.rowcount
 
 
+# Public aliases: social.py builds on these rather than the private names.
+query = _query
+one = _one
+execute = _exec
+
+
 SCHEMA = (
     """
     CREATE TABLE IF NOT EXISTS cr_users (
@@ -225,6 +231,109 @@ SCHEMA = (
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """
+    CREATE TABLE IF NOT EXISTS cr_topics (
+        slug VARCHAR(24) NOT NULL,
+        label VARCHAR(40) NOT NULL,
+        created_by INT UNSIGNED NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (slug)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS cr_posts (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        user_id INT UNSIGNED NOT NULL,
+        kind VARCHAR(16) NOT NULL DEFAULT 'race',
+        language VARCHAR(20) NULL,
+        level VARCHAR(10) NULL,
+        topic VARCHAR(24) NULL,
+        wpm DECIMAL(6,1) NULL,
+        acc DECIMAL(5,1) NULL,
+        seconds DECIMAL(7,2) NULL,
+        place SMALLINT UNSIGNED NULL,
+        stars TINYINT NOT NULL DEFAULT 0,
+        rating_delta SMALLINT NOT NULL DEFAULT 0,
+        opponents VARCHAR(255) NULL,
+        body VARCHAR(500) NULL,
+        likes INT UNSIGNED NOT NULL DEFAULT 0,
+        dislikes INT UNSIGNED NOT NULL DEFAULT 0,
+        comment_count INT UNSIGNED NOT NULL DEFAULT 0,
+        hidden TINYINT(1) NOT NULL DEFAULT 0,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY idx_cr_posts_user (user_id, created_at),
+        KEY idx_cr_posts_created (created_at),
+        CONSTRAINT fk_cr_post_user FOREIGN KEY (user_id)
+            REFERENCES cr_users (id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS cr_reactions (
+        post_id BIGINT UNSIGNED NOT NULL,
+        user_id INT UNSIGNED NOT NULL,
+        value TINYINT NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (post_id, user_id),
+        KEY idx_cr_reactions_user (user_id),
+        CONSTRAINT fk_cr_react_post FOREIGN KEY (post_id)
+            REFERENCES cr_posts (id) ON DELETE CASCADE,
+        CONSTRAINT fk_cr_react_user FOREIGN KEY (user_id)
+            REFERENCES cr_users (id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS cr_comments (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        post_id BIGINT UNSIGNED NOT NULL,
+        user_id INT UNSIGNED NOT NULL,
+        body VARCHAR(500) NOT NULL,
+        hidden TINYINT(1) NOT NULL DEFAULT 0,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY idx_cr_comments_post (post_id, created_at),
+        CONSTRAINT fk_cr_comment_post FOREIGN KEY (post_id)
+            REFERENCES cr_posts (id) ON DELETE CASCADE,
+        CONSTRAINT fk_cr_comment_user FOREIGN KEY (user_id)
+            REFERENCES cr_users (id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS cr_reports (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        kind VARCHAR(12) NOT NULL,
+        target_id BIGINT UNSIGNED NOT NULL,
+        reporter_id INT UNSIGNED NOT NULL,
+        reason VARCHAR(24) NOT NULL,
+        note VARCHAR(300) NULL,
+        ip VARCHAR(45) NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY uniq_cr_report (kind, target_id, reporter_id),
+        KEY idx_cr_reports_target (kind, target_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS cr_challenges (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        from_id INT UNSIGNED NOT NULL,
+        to_id INT UNSIGNED NOT NULL,
+        lobby VARCHAR(8) NOT NULL,
+        language VARCHAR(20) NOT NULL DEFAULT 'python',
+        levels VARCHAR(64) NULL,
+        topics VARCHAR(255) NULL,
+        duration INT NOT NULL DEFAULT 0,
+        status VARCHAR(10) NOT NULL DEFAULT 'pending',
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        KEY idx_cr_ch_to (to_id, status, created_at),
+        KEY idx_cr_ch_from (from_id, status),
+        CONSTRAINT fk_cr_ch_from FOREIGN KEY (from_id)
+            REFERENCES cr_users (id) ON DELETE CASCADE,
+        CONSTRAINT fk_cr_ch_to FOREIGN KEY (to_id)
+            REFERENCES cr_users (id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
     CREATE TABLE IF NOT EXISTS cr_races (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
         user_id INT UNSIGNED NOT NULL,
@@ -258,6 +367,9 @@ MIGRATIONS = (
     ("cr_users", "stars", "ALTER TABLE cr_users ADD COLUMN stars INT UNSIGNED NOT NULL DEFAULT 0"),
     ("cr_races", "stars", "ALTER TABLE cr_races ADD COLUMN stars TINYINT UNSIGNED NOT NULL DEFAULT 0"),
     ("cr_races", "rating_delta", "ALTER TABLE cr_races ADD COLUMN rating_delta SMALLINT NOT NULL DEFAULT 0"),
+    ("cr_snippets", "author_id", "ALTER TABLE cr_snippets ADD COLUMN author_id INT UNSIGNED NULL"),
+    ("cr_snippets", "status", "ALTER TABLE cr_snippets ADD COLUMN status VARCHAR(10) NOT NULL DEFAULT 'public'"),
+    ("cr_snippets", "reports", "ALTER TABLE cr_snippets ADD COLUMN reports INT UNSIGNED NOT NULL DEFAULT 0"),
 )
 
 
@@ -729,9 +841,9 @@ def load_snippets() -> Dict[str, List[dict]]:
     out: Dict[str, List[dict]] = {}
     for row in _query(
         """
-        SELECT id, language, level, topic, code, output
+        SELECT id, language, level, topic, code, output, source, author_id
         FROM cr_snippets
-        WHERE active = 1
+        WHERE active = 1 AND status = 'public'
         ORDER BY language, level, id
         """
     ):
@@ -742,6 +854,8 @@ def load_snippets() -> Dict[str, List[dict]]:
                 "topic": row["topic"],
                 "code": row["code"],
                 "output": row.get("output") or "",
+                "source": row.get("source") or "seed",
+                "author_id": row.get("author_id"),
             }
         )
     return out

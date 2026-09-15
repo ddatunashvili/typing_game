@@ -34,6 +34,7 @@ import bots
 import db
 import library
 import rating
+import social
 from library import (
     catalog,
     count_matching,
@@ -42,6 +43,7 @@ from library import (
 )
 from snippets import (
     LANGUAGES,
+    normalize,
     LEVEL_IDS,
     TOPIC_IDS,
     clean_ids,
@@ -252,7 +254,7 @@ class Lobby:
         self.code = code
         self.language = language if language in LANGUAGE_IDS else "python"
         self.levels: List[str] = clean_ids(levels_filter, LEVEL_IDS)
-        self.topics: List[str] = clean_ids(topics_filter, TOPIC_IDS)
+        self.topics: List[str] = clean_ids(topics_filter, library.topic_ids())
         # 0 = classic (one snippet), >0 = timed run through a playlist
         self.duration = clean_duration(
             default_race_seconds() if duration is None else duration
@@ -590,9 +592,12 @@ class Lobby:
             return
         level = "mixed" if len(self.playlist) > 1 else self.snip.get("level", "")
         topic = "mixed" if len(self.playlist) > 1 else self.snip.get("topic", "")
+        # who each racer was up against, for the post text
+        names = [p.name for p in racers]
         for player in racers:
             if player.bot or not player.uid:
                 continue
+            others = ", ".join(n for n in names if n != player.name)[:255]
             try:
                 await run_in_threadpool(
                     db.record_race,
@@ -611,6 +616,27 @@ class Lobby:
                 )
             except Exception as exc:
                 log.warning("could not record race for %s: %s", player.name, exc)
+
+            # the same race also lands on their profile as a post
+            try:
+                await run_in_threadpool(
+                    social.add_post,
+                    player.uid,
+                    self.language,
+                    level,
+                    topic,
+                    player.wpm,
+                    player.acc,
+                    float(player.time or 0.0),
+                    player.place,
+                    player.stars,
+                    player.delta,
+                    others,
+                    "",
+                    "race",
+                )
+            except Exception as exc:
+                log.warning("could not post race for %s: %s", player.name, exc)
 
     async def maybe_finish(self) -> None:
         racers = self.roster()
@@ -643,7 +669,7 @@ async def api_meta():
     return {
         "languages": languages(),
         "levels": levels(),
-        "topics": topics(),
+        "topics": library.all_topics(),
         "catalog": catalog(),
         "accounts": db.enabled(),
         "settings": library.settings(),
@@ -661,7 +687,7 @@ async def api_snippet(
     level: str = "",
 ):
     wanted_levels = parse_ids(levels, LEVEL_IDS)
-    wanted_topics = parse_ids(topics, TOPIC_IDS)
+    wanted_topics = parse_ids(topics, library.topic_ids())
     pinned = level if level in LEVEL_IDS else None
     chosen = pick_snippet(lang, avoid, wanted_levels, wanted_topics, pinned)
     return {
@@ -685,7 +711,7 @@ async def api_playlist(
 ):
     """An ordered run of snippets, for a timed solo session."""
     wanted_levels = parse_ids(levels, LEVEL_IDS)
-    wanted_topics = parse_ids(topics, TOPIC_IDS)
+    wanted_topics = parse_ids(topics, library.topic_ids())
     pinned = level if level in LEVEL_IDS else None
     run = library.playlist(
         lang, size, wanted_levels, wanted_topics, pinned, unique=bool(unique)
@@ -759,6 +785,387 @@ async def api_rankings(limit: int = 50, request: Request = None):
     }
 
 
+# ---------- player-submitted snippets ----------
+@app.post("/api/snippets")
+async def api_submit_snippet(request: Request):
+    """Add a snippet of your own, optionally under a brand new topic."""
+    user = await current_user(request)
+    if user is None:
+        return JSONResponse({"error": "not_registered"}, status_code=401)
+    uid = int(user["id"])
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    language = str(body.get("language", "")).strip()
+    level = str(body.get("level", "")).strip()
+    code = str(body.get("code", ""))
+    output = str(body.get("output", ""))
+    public = bool(body.get("public", True))
+
+    if language not in LANGUAGE_IDS:
+        return JSONResponse({"error": "bad_language"}, status_code=400)
+    if level not in LEVEL_IDS:
+        return JSONResponse({"error": "bad_level"}, status_code=400)
+
+    cleaned = normalize(code)
+    if len(cleaned) < 20:
+        return JSONResponse({"error": "too_short", "min": 20}, status_code=400)
+    if len(cleaned) > 4000:
+        return JSONResponse({"error": "too_long", "max": 4000}, status_code=413)
+
+    used = await run_in_threadpool(social.snippets_today, uid)
+    if used >= social.SNIPPETS_PER_DAY:
+        return JSONResponse(
+            {"error": "rate_limited", "per_day": social.SNIPPETS_PER_DAY},
+            status_code=429,
+        )
+
+    # a player may invent a topic instead of picking an existing one
+    topic = str(body.get("topic", "")).strip()
+    new_topic = str(body.get("new_topic", "")).strip()
+    if new_topic:
+        made = await run_in_threadpool(social.add_topic, new_topic, uid)
+        if made is None:
+            return JSONResponse({"error": "bad_topic"}, status_code=400)
+        topic = made["id"]
+        # the cached topic list predates this one, so re-read it before validating
+        await run_in_threadpool(library.refresh_topics)
+    if topic not in library.topic_ids():
+        return JSONResponse({"error": "bad_topic"}, status_code=400)
+
+    snippet_id = await run_in_threadpool(
+        social.submit_snippet,
+        uid,
+        language,
+        level,
+        topic,
+        cleaned,
+        normalize(output) if output else "",
+        public,
+    )
+    if snippet_id is None:
+        return JSONResponse({"error": "duplicate"}, status_code=409)
+
+    await run_in_threadpool(library.invalidate)
+    return {
+        "id": snippet_id,
+        "topic": topic,
+        "public": public,
+        "remaining_today": max(0, social.SNIPPETS_PER_DAY - used - 1),
+    }
+
+
+@app.get("/api/snippets/mine")
+async def api_my_snippets(request: Request):
+    user = await current_user(request)
+    if user is None:
+        return JSONResponse({"error": "not_registered"}, status_code=401)
+    rows = await run_in_threadpool(social.my_snippets, int(user["id"]))
+    return {"snippets": rows, "per_day": social.SNIPPETS_PER_DAY}
+
+
+@app.post("/api/snippets/{snippet_id}/status")
+async def api_snippet_status(snippet_id: int, request: Request):
+    user = await current_user(request)
+    if user is None:
+        return JSONResponse({"error": "not_registered"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    ok = await run_in_threadpool(
+        social.set_snippet_status, snippet_id, int(user["id"]), bool(body.get("public"))
+    )
+    if not ok:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    await run_in_threadpool(library.invalidate)
+    return {"ok": True}
+
+
+@app.delete("/api/snippets/{snippet_id}")
+async def api_delete_snippet(snippet_id: int, request: Request):
+    user = await current_user(request)
+    if user is None:
+        return JSONResponse({"error": "not_registered"}, status_code=401)
+    ok = await run_in_threadpool(social.delete_snippet, snippet_id, int(user["id"]))
+    if not ok:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    await run_in_threadpool(library.invalidate)
+    return {"ok": True}
+
+
+@app.post("/api/topics")
+async def api_add_topic(request: Request):
+    """Create a topic without submitting a snippet for it yet."""
+    user = await current_user(request)
+    if user is None:
+        return JSONResponse({"error": "not_registered"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    made = await run_in_threadpool(
+        social.add_topic, str(body.get("label", "")), int(user["id"])
+    )
+    if made is None:
+        return JSONResponse({"error": "bad_topic"}, status_code=400)
+    await run_in_threadpool(library.invalidate)
+    return {"topic": made}
+
+
+# ---------- profiles, feed, reactions, comments ----------
+@app.get("/api/profile/{user_id}")
+async def api_profile_page(user_id: int, request: Request):
+    if not db.enabled():
+        return JSONResponse({"error": "accounts_disabled"}, status_code=404)
+    who = await run_in_threadpool(social.profile, user_id)
+    if who is None:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    viewer = await current_user(request)
+    viewer_id = int(viewer["id"]) if viewer else None
+    posts = await run_in_threadpool(social.feed, 20, None, user_id, viewer_id)
+    return {"profile": who, "posts": posts, "me": viewer_id == user_id}
+
+
+@app.get("/api/feed")
+async def api_feed(request: Request, limit: int = 30, before: int = 0):
+    if not db.enabled():
+        return {"posts": []}
+    viewer = await current_user(request)
+    viewer_id = int(viewer["id"]) if viewer else None
+    posts = await run_in_threadpool(social.feed, limit, before or None, None, viewer_id)
+    return {"posts": posts}
+
+
+@app.post("/api/posts/{post_id}/react")
+async def api_react(post_id: int, request: Request):
+    user = await current_user(request)
+    if user is None:
+        return JSONResponse({"error": "not_registered"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        value = int(body.get("value", 0))
+    except (TypeError, ValueError):
+        value = 0
+    return await run_in_threadpool(social.react, post_id, int(user["id"]), value)
+
+
+@app.get("/api/posts/{post_id}/comments")
+async def api_get_comments(post_id: int):
+    if not db.enabled():
+        return {"comments": []}
+    rows = await run_in_threadpool(social.comments, post_id)
+    return {"comments": rows}
+
+
+@app.post("/api/posts/{post_id}/comments")
+async def api_add_comment(post_id: int, request: Request):
+    user = await current_user(request)
+    if user is None:
+        return JSONResponse({"error": "not_registered"}, status_code=401)
+    uid = int(user["id"])
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    text = str(body.get("body", "")).strip()
+    if not text:
+        return JSONResponse({"error": "empty"}, status_code=400)
+    if len(text) > social.MAX_BODY:
+        return JSONResponse(
+            {"error": "too_long", "max": social.MAX_BODY}, status_code=413
+        )
+
+    recent = await run_in_threadpool(social.comments_last_hour, uid)
+    if recent >= social.COMMENTS_PER_HOUR:
+        return JSONResponse(
+            {"error": "rate_limited", "per_hour": social.COMMENTS_PER_HOUR},
+            status_code=429,
+        )
+
+    comment_id = await run_in_threadpool(social.add_comment, post_id, uid, text)
+    if comment_id is None:
+        return JSONResponse({"error": "empty"}, status_code=400)
+    rows = await run_in_threadpool(social.comments, post_id)
+    return {"id": comment_id, "comments": rows}
+
+
+@app.delete("/api/comments/{comment_id}")
+async def api_delete_comment(comment_id: int, request: Request):
+    user = await current_user(request)
+    if user is None:
+        return JSONResponse({"error": "not_registered"}, status_code=401)
+    ok = await run_in_threadpool(social.delete_comment, comment_id, int(user["id"]))
+    if not ok:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    return {"ok": True}
+
+
+@app.delete("/api/posts/{post_id}")
+async def api_delete_post(post_id: int, request: Request):
+    user = await current_user(request)
+    if user is None:
+        return JSONResponse({"error": "not_registered"}, status_code=401)
+    ok = await run_in_threadpool(social.delete_post, post_id, int(user["id"]))
+    if not ok:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    return {"ok": True}
+
+
+# ---------- reports ----------
+@app.post("/api/report")
+async def api_report(request: Request):
+    """Report a post, comment, snippet or player. Self-moderating by count."""
+    user = await current_user(request)
+    if user is None:
+        return JSONResponse({"error": "not_registered"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    kind = str(body.get("kind", "")).strip()
+    reason = str(body.get("reason", "")).strip()
+    if kind not in social.REPORT_KINDS:
+        return JSONResponse(
+            {"error": "bad_kind", "kinds": list(social.REPORT_KINDS)}, status_code=400
+        )
+    if reason not in social.REPORT_REASONS:
+        return JSONResponse(
+            {"error": "bad_reason", "reasons": list(social.REPORT_REASONS)},
+            status_code=400,
+        )
+    try:
+        target = int(body.get("id", 0))
+    except (TypeError, ValueError):
+        target = 0
+    if target <= 0:
+        return JSONResponse({"error": "bad_target"}, status_code=400)
+
+    result = await run_in_threadpool(
+        social.add_report,
+        kind,
+        target,
+        int(user["id"]),
+        reason,
+        str(body.get("note", "")),
+        client_ip(request),
+    )
+    if result.get("hidden") and kind == "snippet":
+        await run_in_threadpool(library.invalidate)
+    return result
+
+
+# ---------- find players and challenges ----------
+@app.get("/api/players")
+async def api_players(request: Request, limit: int = 40):
+    if not db.enabled():
+        return {"players": [], "accounts": False}
+    rows = await run_in_threadpool(social.players, limit)
+    viewer = await current_user(request)
+    viewer_id = int(viewer["id"]) if viewer else None
+    # whoever is sitting in a lobby right now counts as busy
+    racing = {p.uid for lobby in lobbies.values() for p in lobby.roster() if p.uid}
+    for row in rows:
+        row["racing"] = row["id"] in racing
+        row["me"] = row["id"] == viewer_id
+    return {"players": rows, "accounts": True}
+
+
+@app.post("/api/heartbeat")
+async def api_heartbeat(request: Request):
+    """Keeps the player on the online list, and carries back any invitations."""
+    user = await current_user(request)
+    if user is None:
+        return {"online": False, "challenges": {"incoming": [], "outgoing": []}}
+    uid = int(user["id"])
+    await run_in_threadpool(db.seen, uid, client_ip(request))
+    pending = await run_in_threadpool(social.challenges_for, uid)
+    return {"online": True, "challenges": pending}
+
+
+@app.get("/api/challenges")
+async def api_challenges(request: Request):
+    user = await current_user(request)
+    if user is None:
+        return {"incoming": [], "outgoing": []}
+    return await run_in_threadpool(social.challenges_for, int(user["id"]))
+
+
+@app.post("/api/challenge")
+async def api_challenge(request: Request):
+    """Open a lobby and invite another player into it."""
+    user = await current_user(request)
+    if user is None:
+        return JSONResponse({"error": "not_registered"}, status_code=401)
+    uid = int(user["id"])
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        target = int(body.get("to", 0))
+    except (TypeError, ValueError):
+        target = 0
+    if target <= 0 or target == uid:
+        return JSONResponse({"error": "bad_target"}, status_code=400)
+
+    other = await run_in_threadpool(social.profile, target)
+    if other is None:
+        return JSONResponse({"error": "no_such_player"}, status_code=404)
+
+    lang = str(body.get("lang", "python"))
+    wanted_levels = parse_ids(str(body.get("levels", "")), LEVEL_IDS)
+    wanted_topics = parse_ids(str(body.get("topics", "")), library.topic_ids())
+    duration = clean_duration(body.get("duration", 0))
+
+    code = new_code()
+    lobbies[code] = Lobby(code, lang, wanted_levels, wanted_topics, duration)
+
+    challenge_id = await run_in_threadpool(
+        social.add_challenge,
+        uid,
+        target,
+        code,
+        lang,
+        ",".join(wanted_levels),
+        ",".join(wanted_topics),
+        duration,
+    )
+    return {
+        "id": challenge_id,
+        "code": code,
+        "to": {"id": target, "name": other["name"]},
+    }
+
+
+@app.post("/api/challenges/{challenge_id}/{action}")
+async def api_challenge_action(challenge_id: int, action: str, request: Request):
+    user = await current_user(request)
+    if user is None:
+        return JSONResponse({"error": "not_registered"}, status_code=401)
+    if action not in ("accept", "decline"):
+        return JSONResponse({"error": "bad_action"}, status_code=400)
+
+    status = "accepted" if action == "accept" else "declined"
+    result = await run_in_threadpool(
+        social.set_challenge_status, challenge_id, int(user["id"]), status
+    )
+    if result is None:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    if status == "accepted" and result["lobby"] not in lobbies:
+        return JSONResponse({"error": "lobby_gone", "status": status}, status_code=410)
+    return result
+
+
 @app.get("/api/config")
 async def api_config():
     """Effective settings, and where the snippet library is being read from."""
@@ -784,7 +1191,7 @@ async def api_new_lobby(
         code,
         lang,
         parse_ids(levels, LEVEL_IDS),
-        parse_ids(topics, TOPIC_IDS),
+        parse_ids(topics, library.topic_ids()),
         None if duration < 0 else duration,
     )
     lobbies[code] = lobby
@@ -1008,12 +1415,16 @@ async def api_race(request: Request):
     # solo has nobody to beat, so there is no win bonus
     earned = rating.stars(acc, errors, length, bool(body.get("completed", True)), False)
 
+    language = str(body.get("language", ""))[:20]
+    level = str(body.get("level", ""))[:10]
+    topic = str(body.get("topic", ""))[:24]
+
     await run_in_threadpool(
         db.record_race,
         int(user["id"]),
-        str(body.get("language", ""))[:20],
-        str(body.get("level", ""))[:10],
-        str(body.get("topic", ""))[:24],
+        language,
+        level,
+        topic,
         wpm,
         acc,
         seconds,
@@ -1023,6 +1434,25 @@ async def api_race(request: Request):
         earned,
         0,  # solo has no opponent, so the rating does not move
     )
+    try:
+        await run_in_threadpool(
+            social.add_post,
+            int(user["id"]),
+            language,
+            level,
+            topic,
+            wpm,
+            acc,
+            seconds,
+            None,
+            earned,
+            0,
+            "",
+            "",
+            "solo",
+        )
+    except Exception as exc:
+        log.warning("could not post solo run: %s", exc)
     return {"ok": True, "stars": earned, "note": rating.star_note(earned)}
 
 
@@ -1052,7 +1482,7 @@ async def ws_lobby(
             code,
             lang,
             parse_ids(levels, LEVEL_IDS),
-            parse_ids(topics, TOPIC_IDS),
+            parse_ids(topics, library.topic_ids()),
             None if duration < 0 else duration,
         )
         lobbies[code] = lobby
@@ -1151,7 +1581,7 @@ async def ws_lobby(
                 if pid != lobby.host or lobby.state in ("countdown", "racing"):
                     continue
                 lobby.levels = clean_ids(msg.get("levels"), LEVEL_IDS)
-                lobby.topics = clean_ids(msg.get("topics"), TOPIC_IDS)
+                lobby.topics = clean_ids(msg.get("topics"), library.topic_ids())
                 lobby.level_lock = None  # a new filter may mean a new level
                 lobby.reroll()
                 await lobby.push_state()

@@ -88,6 +88,8 @@
     <span class="brand-text">Code<em>Race</em></span>
   </a>
   <div class="top-right">
+    <button id="feedBtn" class="ghost">Feed</button>
+    <button id="playersBtn" class="ghost">Players<span id="chBadge" class="ch-badge hidden">0</span></button>
     <button id="ranksBtn" class="ghost">Rankings</button>
     <button id="profileBtn" class="profile">
       <span id="profileAvatar" class="avatar"></span>
@@ -148,6 +150,7 @@
         <input id="joinCode" maxlength="5" placeholder="CODE" autocomplete="off" />
         <button class="ghost big" type="submit">Join</button>
       </form>
+      <button id="snippetsBtn" class="ghost big" type="button">My snippets</button>
     </section>
     <p id="homeErr" class="err"></p>
 
@@ -194,6 +197,220 @@
     </section>
   </div>
 </main>
+
+<!-- FEED -->
+<main id="screen-feed" class="screen hidden">
+  <div class="home-wrap">
+    <div class="ranks-head">
+      <h1>Feed</h1>
+      <button class="ghost js-back" type="button">back to game</button>
+    </div>
+    <p class="sub">
+      Every finished race is posted here. Like it, argue in the comments, or report it.
+    </p>
+
+    <section class="panel">
+      <h2>latest races</h2>
+      <div id="feedList" class="posts"></div>
+      <p id="feedEmpty" class="muted hidden">No races posted yet. Go and set a time.</p>
+      <div class="feed-more">
+        <button id="feedMore" class="ghost hidden" type="button">load older</button>
+      </div>
+    </section>
+  </div>
+</main>
+
+<!-- PLAYERS -->
+<main id="screen-players" class="screen hidden">
+  <div class="home-wrap">
+    <div class="ranks-head">
+      <h1>Find players</h1>
+      <button class="ghost js-back" type="button">back to game</button>
+    </div>
+    <p class="sub">
+      Anyone active in the last five minutes. Challenge them and they get an
+      invitation the moment they look. <span id="playersLive" class="live">live</span>
+    </p>
+
+    <section class="panel hidden" id="chPanel">
+      <h2>your invitations</h2>
+      <div id="chList" class="ch-list"></div>
+    </section>
+
+    <section class="panel">
+      <h2>
+        challenge settings
+        <span class="muted">used for every invitation you send</span>
+      </h2>
+      <div class="ch-settings">
+        <label class="field">
+          <span>language</span>
+          <select id="chLang" class="lang-select"></select>
+        </label>
+        <label class="field">
+          <span>race time</span>
+          <select id="chDuration" class="lang-select">
+            <option value="0">One snippet</option>
+            <option value="30">30s</option>
+            <option value="60">1 min</option>
+            <option value="120">2 min</option>
+            <option value="300">5 min</option>
+          </select>
+        </label>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>online now <span id="playersCount" class="muted"></span></h2>
+      <div id="playersList" class="ranks"></div>
+      <p id="playersEmpty" class="muted hidden">Nobody else about right now.</p>
+    </section>
+  </div>
+</main>
+
+<!-- PUBLIC PROFILE -->
+<main id="screen-user" class="screen hidden">
+  <div class="home-wrap">
+    <div class="ranks-head">
+      <h1 id="userTitle">Profile</h1>
+      <button class="ghost js-back" type="button">back to game</button>
+    </div>
+
+    <section class="panel">
+      <div class="user-head">
+        <span id="userAvatar" class="avatar big"></span>
+        <div class="user-meta">
+          <h2 id="userName" class="user-name"></h2>
+          <p id="userRank" class="muted"></p>
+          <p id="userSeen" class="muted"></p>
+        </div>
+        <div class="user-actions">
+          <button id="userChallenge" class="accent hidden" type="button">Challenge</button>
+          <button id="userReport" class="ghost hidden" type="button">Report</button>
+        </div>
+      </div>
+
+      <div id="userStats" class="win-stats"></div>
+      <div id="userLangs" class="chips"></div>
+    </section>
+
+    <section class="panel">
+      <h2>races <span class="muted">newest first</span></h2>
+      <div id="userPosts" class="posts"></div>
+      <p id="userNoPosts" class="muted hidden">No races posted yet.</p>
+    </section>
+  </div>
+</main>
+
+<!-- MY SNIPPETS -->
+<main id="screen-snippets" class="screen hidden">
+  <div class="home-wrap">
+    <div class="ranks-head">
+      <h1>Your snippets</h1>
+      <button class="ghost js-back" type="button">back to game</button>
+    </div>
+    <p class="sub">
+      Add code of your own. Public snippets join everyone's races; private ones
+      stay yours. <span id="snipQuota" class="muted"></span>
+    </p>
+
+    <section class="panel">
+      <h2>add a snippet</h2>
+      <div class="snip-form">
+        <div class="snip-row">
+          <label class="field">
+            <span>language</span>
+            <select id="snipLang" class="lang-select"></select>
+          </label>
+          <label class="field">
+            <span>level</span>
+            <select id="snipLevel" class="lang-select"></select>
+          </label>
+          <label class="field">
+            <span>topic</span>
+            <select id="snipTopic" class="lang-select"></select>
+          </label>
+        </div>
+
+        <label class="field">
+          <span>
+            or create a topic
+            <em class="muted">leave blank to use the dropdown</em>
+          </span>
+          <input id="snipNewTopic" maxlength="40" placeholder="e.g. Interview prep" />
+        </label>
+
+        <label class="field">
+          <span>code <em class="muted">20 to 4000 characters</em></span>
+          <textarea id="snipCode" rows="10" spellcheck="false"
+                    placeholder="def two_sum(nums, target):"></textarea>
+        </label>
+
+        <label class="field">
+          <span>expected output <em class="muted">optional, shown after the race</em></span>
+          <textarea id="snipOutput" rows="3" spellcheck="false"
+                    placeholder="&gt;&gt;&gt; two_sum([2, 7], 9)"></textarea>
+        </label>
+
+        <label class="check">
+          <input id="snipPublic" type="checkbox" checked />
+          <span>publish it so other players get it too</span>
+        </label>
+
+        <p id="snipErr" class="err"></p>
+        <div class="modal-ctl">
+          <button id="snipSave" class="accent" type="button">Add snippet</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>yours <span id="snipCount" class="muted"></span></h2>
+      <div id="snipList" class="snip-list"></div>
+      <p id="snipEmpty" class="muted hidden">You have not added any yet.</p>
+    </section>
+  </div>
+</main>
+
+<!-- REPORT -->
+<div id="reportModal" class="modal hidden">
+  <div class="modal-card">
+    <h3 id="reportTitle">Report</h3>
+    <p class="muted">
+      Three separate players reporting the same thing hides it automatically.
+    </p>
+
+    <label class="field">
+      <span>reason</span>
+      <select id="reportReason" class="lang-select">
+        <option value="cheating">Cheating</option>
+        <option value="spam">Spam</option>
+        <option value="abuse">Abuse</option>
+        <option value="broken-snippet">Broken snippet</option>
+        <option value="other">Something else</option>
+      </select>
+    </label>
+
+    <label class="field">
+      <span>anything to add <em class="muted">optional</em></span>
+      <textarea id="reportNote" rows="3" maxlength="300"></textarea>
+    </label>
+
+    <p id="reportErr" class="err"></p>
+    <div class="modal-ctl">
+      <button id="reportCancel" class="ghost" type="button">cancel</button>
+      <button id="reportSend" class="accent" type="button">Send report</button>
+    </div>
+  </div>
+</div>
+
+<!-- CHALLENGE TOAST -->
+<div id="chToast" class="ch-toast hidden">
+  <span id="chToastAvatar" class="avatar sm"></span>
+  <span id="chToastText" class="ch-toast-text"></span>
+  <button id="chToastAccept" class="accent" type="button">Accept</button>
+  <button id="chToastDecline" class="ghost" type="button">Later</button>
+</div>
 
 <!-- LOBBY / RACE -->
 <main id="screen-room" class="screen hidden">
