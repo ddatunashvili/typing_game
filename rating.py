@@ -47,11 +47,19 @@ def ranks() -> List[dict]:
 
 
 # ---------- stars ----------
-def stars(accuracy: float, errors: int, length: int, completed: bool = True) -> int:
+def stars(
+    accuracy: float,
+    errors: int,
+    length: int,
+    completed: bool = True,
+    won: bool = False,
+) -> int:
     """0-3 stars for one run.
 
-    Accuracy is the headline number; the error rate stops a long sloppy run from
-    scoring well just because the percentage looks round.
+    Accuracy is the headline number and the error rate stops a long sloppy run
+    from scoring well just because the percentage looks round. Winning the race
+    is worth a star on top: out-typing everyone should not score below someone
+    who was tidier over a third of the distance.
     """
     if not completed:
         return 0
@@ -59,12 +67,17 @@ def stars(accuracy: float, errors: int, length: int, completed: bool = True) -> 
     error_rate = max(0, int(errors)) / length
 
     if accuracy >= 96 and error_rate <= 0.04:
-        return 3
-    if accuracy >= 88 and error_rate <= 0.12:
-        return 2
-    if accuracy >= 72:
-        return 1
-    return 0
+        earned = 3
+    elif accuracy >= 88 and error_rate <= 0.12:
+        earned = 2
+    elif accuracy >= 72:
+        earned = 1
+    else:
+        earned = 0
+
+    if won and earned:
+        earned = min(3, earned + 1)
+    return earned
 
 
 STAR_NOTES = {
@@ -73,6 +86,10 @@ STAR_NOTES = {
     1: "Messy - lots of corrections",
     0: "Rough one",
 }
+
+# Bots type at a fixed synthetic accuracy, so a star rating for them would be
+# meaningless and would flatter them against a real player.
+BOT_STARS = -1
 
 
 def star_note(count: int) -> str:

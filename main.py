@@ -425,6 +425,10 @@ class Lobby:
         player.acc = float(bot.get("acc", 96.0))
         tick = 0.25
         pos = 0.0
+        lines = list(bots.roasts(bot.get("slug", "")))
+        random.shuffle(lines)
+        # first jab lands a couple of seconds in, then every so often
+        next_roast = time.time() + random.uniform(2.5, 5.0)
         try:
             while self.state == "racing" and not player.finished:
                 await asyncio.sleep(tick)
@@ -447,7 +451,22 @@ class Lobby:
                         await self._bot_finish(player)
                         return
 
-                elapsed = max(0.5, time.time() - self.start_ts)
+                now = time.time()
+                if lines and now >= next_roast:
+                    await self.broadcast(
+                        {
+                            "t": "chat",
+                            "name": player.name,
+                            "id": player.id,
+                            "slug": bot.get("slug"),
+                            "bot": True,
+                            "text": lines.pop(),
+                            "ts": now,
+                        }
+                    )
+                    next_roast = now + random.uniform(6.0, 13.0)
+
+                elapsed = max(0.5, now - self.start_ts)
                 player.pos = int(pos)
                 player.progress = min(1.0, pos / length)
                 player.wpm = ((player.chars + pos) / 5.0) / (elapsed / 60.0)
@@ -532,13 +551,16 @@ class Lobby:
         if self.duration > 0:
             length = max(1, sum(len(s["code"]) for s in self.playlist[: max(1, 1)]))
 
+        # In timed mode the distance actually covered is what matters, not the
+        # length of one snippet.
         for player in racers:
             if player.bot:
-                player.stars = rating.stars(player.acc, 0, length, True)
+                player.stars = rating.BOT_STARS  # synthetic accuracy: no stars
                 continue
-            errors = max(0, int(round(length * (100.0 - player.acc) / 100.0)))
+            span = max(1, player.chars) if self.duration > 0 else length
+            errors = max(0, int(round(span * (100.0 - player.acc) / 100.0)))
             player.stars = rating.stars(
-                player.acc, errors, length, bool(player.finished)
+                player.acc, errors, span, bool(player.finished), player.place == 1
             )
 
         # Elo: guests and bots are opposition but keep no rating of their own
@@ -682,16 +704,32 @@ async def api_bots():
     return {"bots": bots.roster(), "ranks": rating.ranks()}
 
 
-@app.get("/api/bot-avatar/{slug}.svg")
-async def api_bot_avatar(slug: str):
-    """Deterministic identicon, so every bot has a stable face."""
+CACHE_WEEK = {"Cache-Control": "public, max-age=604800"}
+
+
+def _bot_image(slug: str, card: bool = False) -> Response:
+    """Imported artwork when it exists, otherwise a generated identicon."""
     bot = bots.get(slug)
     seed = bot["slug"] if bot else (slug or "unknown")
+    path = bots.card_art(seed) if card else bots.art(seed)
+    if path is not None:
+        return FileResponse(path, media_type=bots.media_type(path), headers=CACHE_WEEK)
     return Response(
         content=bots.avatar_svg(seed),
         media_type="image/svg+xml",
-        headers={"Cache-Control": "public, max-age=604800"},
+        headers=CACHE_WEEK,
     )
+
+
+@app.get("/api/bot-avatar/{slug}")
+async def api_bot_avatar(slug: str):
+    # tolerate the old .svg suffix from a cached page
+    return _bot_image(slug[:-4] if slug.endswith(".svg") else slug)
+
+
+@app.get("/api/bot-card/{slug}")
+async def api_bot_card(slug: str):
+    return _bot_image(slug, card=True)
 
 
 @app.get("/api/rankings")
@@ -758,13 +796,24 @@ async def api_lobby(code: str):
 # ---------- accounts ----------
 @app.get("/api/me")
 async def api_me(request: Request):
+    """Who is this. First-time visitors get an account without being asked."""
     if not db.enabled():
         return {"accounts": False, "user": None}
+
+    ip = client_ip(request)
     row = await current_user(request)
-    if row is None:
-        return {"accounts": True, "user": None}
-    await run_in_threadpool(db.seen, int(row["id"]), client_ip(request))
-    return {"accounts": True, "user": db.public_user(row)}
+    if row is not None:
+        await run_in_threadpool(db.seen, int(row["id"]), ip)
+        return {"accounts": True, "user": db.public_user(row)}
+
+    # No cookie yet: mint a profile with a random handle and identicon. The
+    # cookie is the identity; the IP is only recorded, never used to claim an
+    # existing account (people behind one router would share a profile).
+    handle = await run_in_threadpool(db.random_free_name)
+    token, user = await run_in_threadpool(db.register, handle, ip)
+    response = JSONResponse({"accounts": True, "user": user, "created": True})
+    set_token_cookie(response, token, request.url.scheme == "https")
+    return response
 
 
 @app.post("/api/register")
@@ -777,14 +826,19 @@ async def api_register(request: Request):
         body = await request.json()
     except Exception:
         pass
-    name = db.clean_name(str(body.get("name", "")))
-    if not name:
-        return JSONResponse({"error": "name_required"}, status_code=400)
-
+    name = db.clean_name(str(body.get("name", ""))) or db.random_name()
     ip = client_ip(request)
     existing = await current_user(request)
     if existing is not None:
         # Already recognised: treat a second register as a rename.
+        if await run_in_threadpool(db.name_taken, name, int(existing["id"])):
+            ideas = await run_in_threadpool(
+                db.name_suggestions, name, int(existing["id"]), 5
+            )
+            return JSONResponse(
+                {"error": "name_taken", "name": name, "suggestions": ideas},
+                status_code=409,
+            )
         await run_in_threadpool(db.rename, int(existing["id"]), name)
         await run_in_threadpool(db.seen, int(existing["id"]), ip)
         row = await run_in_threadpool(db.find_by_token, request.cookies[COOKIE_NAME])
@@ -808,9 +862,41 @@ async def api_profile(request: Request):
     name = db.clean_name(str(body.get("name", "")))
     if not name:
         return JSONResponse({"error": "name_required"}, status_code=400)
-    await run_in_threadpool(db.rename, int(user["id"]), name)
+
+    uid = int(user["id"])
+    if await run_in_threadpool(db.name_taken, name, uid):
+        ideas = await run_in_threadpool(db.name_suggestions, name, uid, 5)
+        return JSONResponse(
+            {"error": "name_taken", "name": name, "suggestions": ideas},
+            status_code=409,
+        )
+
+    await run_in_threadpool(db.rename, uid, name)
     row = await run_in_threadpool(db.find_by_token, request.cookies[COOKIE_NAME])
     return {"user": db.public_user(row)}
+
+
+@app.get("/api/name-check")
+async def api_name_check(request: Request, name: str = ""):
+    """Live availability check for the profile dialog."""
+    wanted = db.clean_name(name)
+    if not wanted:
+        return {"name": "", "ok": False, "reason": "empty", "suggestions": []}
+    if not db.enabled():
+        return {"name": wanted, "ok": True, "suggestions": []}
+
+    user = await current_user(request)
+    uid = int(user["id"]) if user else None
+    taken = await run_in_threadpool(db.name_taken, wanted, uid)
+    ideas = (
+        await run_in_threadpool(db.name_suggestions, wanted, uid, 5) if taken else []
+    )
+    return {
+        "name": wanted,
+        "ok": not taken,
+        "reason": "taken" if taken else "free",
+        "suggestions": ideas,
+    }
 
 
 @app.post("/api/avatar")
@@ -844,16 +930,15 @@ async def api_clear_avatar(request: Request):
 
 @app.get("/api/avatar/{user_id}")
 async def api_get_avatar(user_id: int):
-    if not db.enabled():
-        return JSONResponse({"error": "accounts_disabled"}, status_code=404)
-    found = await run_in_threadpool(db.get_avatar, user_id)
-    if found is None:
-        return JSONResponse({"error": "no_avatar"}, status_code=404)
-    data, mime = found
+    """The uploaded image, or a generated identicon so nobody is faceless."""
+    found = await run_in_threadpool(db.get_avatar, user_id) if db.enabled() else None
+    if found is not None:
+        data, mime = found
+        return Response(content=data, media_type=mime, headers=CACHE_WEEK)
     return Response(
-        content=data,
-        media_type=mime,
-        headers={"Cache-Control": "public, max-age=604800"},
+        content=bots.avatar_svg("player-%d" % user_id),
+        media_type="image/svg+xml",
+        headers=CACHE_WEEK,
     )
 
 
@@ -883,7 +968,8 @@ async def api_race(request: Request):
 
     length = max(1, int(float(body.get("length", 0) or 0)))
     errors = max(0, int(float(body.get("errors", 0) or 0)))
-    earned = rating.stars(acc, errors, length, bool(body.get("completed", True)))
+    # solo has nobody to beat, so there is no win bonus
+    earned = rating.stars(acc, errors, length, bool(body.get("completed", True)), False)
 
     await run_in_threadpool(
         db.record_race,

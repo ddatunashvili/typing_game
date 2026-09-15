@@ -9,11 +9,11 @@
     room: $("screen-room"),
     name: $("nameInput"),
     nameField: $("nameField"),
-    register: $("registerBtn"),
-    profileBox: $("profileBox"),
+    brand: $("brand"),
+    profileBtn: $("profileBtn"),
     profileAvatar: $("profileAvatar"),
     profileName: $("profileName"),
-    profileEdit: $("profileEdit"),
+    profileRate: $("profileRate"),
     leave: $("leaveBtn"),
     langGrid: $("langGrid"),
     levelChips: $("levelChips"),
@@ -74,6 +74,14 @@
     pfErr: $("pfErr"),
     pfCancel: $("pfCancel"),
     pfSave: $("pfSave"),
+    pfNameNote: $("pfNameNote"),
+    pfIdeas: $("pfIdeas"),
+    pfDrop: $("pfDrop"),
+    pfCrop: $("pfCrop"),
+    pfStage: $("pfStage"),
+    pfCanvas: $("pfCanvas"),
+    pfZoom: $("pfZoom"),
+    pfRecrop: $("pfRecrop"),
     ranksBtn: $("ranksBtn"),
     ranksBack: $("ranksBack"),
     ranks: $("screen-ranks"),
@@ -93,6 +101,18 @@
     runStars: $("runStars"),
     runTitle: $("runTitle"),
     ghosts: $("ghosts"),
+    winModal: $("winModal"),
+    winStars: $("winStars"),
+    winTitle: $("winTitle"),
+    winSub: $("winSub"),
+    winWpm: $("winWpm"),
+    winAcc: $("winAcc"),
+    winPlace: $("winPlace"),
+    winDelta: $("winDelta"),
+    winDeltaBox: $("winDeltaBox"),
+    winNote: $("winNote"),
+    winClose: $("winClose"),
+    winAgain: $("winAgain"),
   };
 
   /* Colours for opponent carets - each racer keeps the same one. */
@@ -436,7 +456,7 @@
     paintHud(w, a, 0);
     el.hint.textContent =
       "time — " + R.snips + " snippet(s), " + liveChars() + " chars, " + Math.round(w) + " wpm";
-    const earned = starsFor(a, R.errors + T.errors, Math.max(1, liveChars()), R.snips > 0);
+    const earned = starsFor(a, R.errors + T.errors, Math.max(1, liveChars()), R.snips > 0, false);
     showRun(earned, a, R.snips > 0);
     if (S.solo) {
       showTimedResult(w, a);
@@ -458,7 +478,7 @@
       ? "playlist cleared — " + R.snips + " snippet(s) at " + Math.round(w) + " wpm"
       : "done — " + Math.round(w) + " wpm / " + Math.round(a) + "% accuracy";
     el.codeBox.classList.add("locked");
-    const earned = starsFor(a, R.errors + T.errors, Math.max(1, R.chars + T.code.length), true);
+    const earned = starsFor(a, R.errors + T.errors, Math.max(1, R.chars + T.code.length), true, false);
     showRun(earned, a, true);
     if (S.solo) {
       if (timed) showTimedResult(w, a);
@@ -695,7 +715,7 @@
   function paintAvatar(node, who) {
     // bots get a generated identicon instead of an upload
     if (who && who.bot && who.slug) {
-      node.style.backgroundImage = 'url("/api/bot-avatar/' + who.slug + '.svg")';
+      node.style.backgroundImage = 'url("/api/bot-avatar/' + who.slug + '")';
       node.textContent = "";
       node.classList.add("has-img", "is-bot");
       return;
@@ -703,7 +723,8 @@
     node.classList.remove("is-bot");
     const uid = who.uid != null ? who.uid : who.id;
     const version = who.avatar || 0;
-    if (uid && version) {
+    if (uid) {
+      // the server falls back to a generated identicon, so this always resolves
       node.style.backgroundImage = 'url("' + avatarUrl(uid, version) + '")';
       node.textContent = "";
       node.classList.add("has-img");
@@ -730,13 +751,17 @@
   };
 
   /** Same thresholds the server uses, so the panel and the DB agree. */
-  function starsFor(acc, errors, length, completed) {
+  function starsFor(acc, errors, length, completed, won) {
     if (!completed) return 0;
     const rate = Math.max(0, errors) / Math.max(1, length);
-    if (acc >= 96 && rate <= 0.04) return 3;
-    if (acc >= 88 && rate <= 0.12) return 2;
-    if (acc >= 72) return 1;
-    return 0;
+    let earned = 0;
+    if (acc >= 96 && rate <= 0.04) earned = 3;
+    else if (acc >= 88 && rate <= 0.12) earned = 2;
+    else if (acc >= 72) earned = 1;
+    // winning is worth a star, so out-typing everyone cannot score below a
+    // tidier opponent who covered a third of the distance
+    if (won && earned) earned = Math.min(3, earned + 1);
+    return earned;
   }
 
   /* ---------- simulated run panel ---------- */
@@ -764,6 +789,60 @@
         clearInterval(S.runTimer);
       }
     }, 16);
+  }
+
+  /* ---------- outcome overlay ---------- */
+  function showOutcome(st) {
+    const me = st.players.find((p) => p.id === S.pid);
+    if (!me || !me.finished) return;
+
+    const others = st.players.filter((p) => p.id !== S.pid);
+    const won = me.place === 1;
+    const timed = st.duration > 0;
+    const beaten = others.filter((p) => (p.place || 99) > (me.place || 99));
+    const ahead = others.filter((p) => (p.place || 99) < (me.place || 99));
+
+    el.winStars.innerHTML = "";
+    for (let i = 0; i < 3; i++) {
+      const star = document.createElement("span");
+      star.className = "wstar" + (i < (me.stars || 0) ? " on" : "");
+      star.textContent = i < (me.stars || 0) ? "★" : "☆";
+      star.style.animationDelay = i * 140 + "ms";
+      el.winStars.appendChild(star);
+    }
+
+    el.winModal.classList.toggle("won", won);
+    el.winTitle.textContent = others.length
+      ? won ? "You win!" : "Beaten this time"
+      : "Run complete";
+
+    if (!others.length) el.winSub.textContent = "";
+    else if (won)
+      el.winSub.textContent =
+        "You beat " +
+        (beaten.length === 1 ? beaten[0].name : beaten.length + " opponents");
+    else
+      el.winSub.textContent =
+        (ahead.length === 1 ? ahead[0].name : ahead.length + " racers") + " got there first";
+
+    el.winWpm.textContent = Math.round(me.wpm);
+    el.winAcc.textContent = Math.round(me.acc) + "%";
+    el.winPlace.textContent = me.place ? "#" + me.place : "-";
+    el.winDeltaBox.classList.toggle("hidden", !me.delta);
+    if (me.delta) {
+      el.winDelta.textContent = (me.delta > 0 ? "+" : "") + me.delta;
+      el.winDelta.className = me.delta > 0 ? "up" : "down";
+    }
+    el.winNote.textContent = timed
+      ? (me.snips || 0) + " snippets, " + (me.chars || 0) + " characters - " +
+        (STAR_NOTES[me.stars] || "")
+      : (STAR_NOTES[me.stars] || "");
+
+    el.winModal.classList.remove("hidden");
+  }
+
+  function hideOutcome() {
+    el.winModal.classList.add("hidden");
   }
 
   function hideRun() {
@@ -809,22 +888,16 @@
 
   function paintProfile() {
     const known = !!S.me;
-    el.profileBox.classList.toggle("hidden", !known);
-    el.nameField.classList.toggle("hidden", known);
-    el.register.classList.toggle("hidden", known || !S.accounts);
+    // accounts are automatic, so the button is only hidden with no database
+    el.profileBtn.classList.toggle("hidden", !S.accounts);
+    el.nameField.classList.toggle("hidden", S.accounts);
     if (known) {
       el.profileName.textContent = S.me.name;
-      el.profileName.title = S.me.rank + " - " + S.me.rating;
+      el.profileBtn.title = S.me.name + " - " + S.me.rank + " (" + S.me.rating + ")";
+      el.profileRate.textContent = S.me.rating;
+      el.profileRate.title = S.me.rank;
       paintAvatar(el.profileAvatar, S.me);
       el.name.value = S.me.name;
-      let badge = el.profileBox.querySelector(".rate");
-      if (!badge) {
-        badge = document.createElement("span");
-        badge.className = "rate";
-        el.profileBox.insertBefore(badge, el.profileEdit);
-      }
-      badge.textContent = S.me.rating;
-      badge.title = S.me.rank;
     }
   }
 
@@ -873,16 +946,142 @@
   function openProfile() {
     el.pfErr.textContent = "";
     el.pfAvatar.value = "";
-    el.pfTitle.textContent = S.me ? "Your profile" : "Create your profile";
+    el.pfTitle.textContent = "Your profile";
     el.pfName.value = S.me ? S.me.name : (el.name.value || "").trim();
     el.pfRemove.classList.toggle("hidden", !(S.me && S.me.avatar));
     paintAvatar(el.pfPreview, S.me || { name: el.pfName.value });
+    el.pfNameNote.textContent = "";
+    el.pfNameNote.className = "name-note";
+    paintIdeas([]);
+    closeCropper();
     el.modal.classList.remove("hidden");
     el.pfName.focus();
   }
 
   function closeProfile() {
     el.modal.classList.add("hidden");
+  }
+
+  /* ---------- avatar cropper ---------- */
+  const CROP_PX = 256;
+  const CROP = { img: null, zoom: 1, x: 0, y: 0, drag: null };
+
+  function drawCrop() {
+    const ctx = el.pfCanvas.getContext("2d");
+    ctx.clearRect(0, 0, CROP_PX, CROP_PX);
+    if (!CROP.img) return;
+    const img = CROP.img;
+    // "cover" the square, then apply the zoom and the drag offset
+    const base = Math.max(CROP_PX / img.width, CROP_PX / img.height);
+    const scale = base * CROP.zoom;
+    const w = img.width * scale;
+    const h = img.height * scale;
+    const maxX = Math.max(0, (w - CROP_PX) / 2);
+    const maxY = Math.max(0, (h - CROP_PX) / 2);
+    CROP.x = Math.max(-maxX, Math.min(maxX, CROP.x));
+    CROP.y = Math.max(-maxY, Math.min(maxY, CROP.y));
+    ctx.drawImage(img, (CROP_PX - w) / 2 + CROP.x, (CROP_PX - h) / 2 + CROP.y, w, h);
+  }
+
+  function openCropper(file) {
+    if (!file) return;
+    if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) {
+      el.pfErr.textContent = "use a png, jpeg, gif or webp";
+      return;
+    }
+    if (file.size > 8 * 1024 * 1024) {
+      el.pfErr.textContent = "that image is too big to load (8 MB max)";
+      return;
+    }
+    el.pfErr.textContent = "";
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      CROP.img = img;
+      CROP.zoom = 1;
+      CROP.x = 0;
+      CROP.y = 0;
+      el.pfZoom.value = "100";
+      el.pfCrop.classList.remove("hidden");
+      el.pfDrop.classList.add("hidden");
+      drawCrop();
+      URL.revokeObjectURL(url);
+    };
+    img.onerror = () => {
+      el.pfErr.textContent = "could not read that image";
+      URL.revokeObjectURL(url);
+    };
+    img.src = url;
+  }
+
+  function closeCropper() {
+    CROP.img = null;
+    el.pfCrop.classList.add("hidden");
+    el.pfDrop.classList.remove("hidden");
+    el.pfAvatar.value = "";
+  }
+
+  /** The cropped square as a file, or null when nothing was picked. */
+  function croppedBlob() {
+    if (!CROP.img) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      el.pfCanvas.toBlob(
+        (blob) => resolve(blob ? new File([blob], "avatar.webp", { type: blob.type }) : null),
+        "image/webp",
+        0.9
+      );
+    });
+  }
+
+  /* ---------- name availability ---------- */
+  let nameTimer = 0;
+
+  function paintIdeas(list) {
+    el.pfIdeas.innerHTML = "";
+    for (const idea of list || []) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "idea";
+      chip.textContent = idea;
+      chip.onclick = () => {
+        el.pfName.value = idea;
+        checkName();
+      };
+      el.pfIdeas.appendChild(chip);
+    }
+  }
+
+  async function checkName() {
+    const name = (el.pfName.value || "").trim();
+    if (!name) {
+      el.pfNameNote.textContent = "";
+      el.pfNameNote.className = "name-note";
+      paintIdeas([]);
+      return true;
+    }
+    if (S.me && name.toLowerCase() === S.me.name.toLowerCase()) {
+      el.pfNameNote.textContent = "this is your current name";
+      el.pfNameNote.className = "name-note ok";
+      paintIdeas([]);
+      return true;
+    }
+    try {
+      const res = await fetch("/api/name-check?name=" + encodeURIComponent(name));
+      const data = await res.json();
+      if (data.ok) {
+        el.pfNameNote.textContent = "available";
+        el.pfNameNote.className = "name-note ok";
+        paintIdeas([]);
+        return true;
+      }
+      el.pfNameNote.textContent = '"' + data.name + '" is already taken - try:';
+      el.pfNameNote.className = "name-note bad";
+      paintIdeas(data.suggestions);
+      return false;
+    } catch (err) {
+      el.pfNameNote.textContent = "";
+      return true;
+    }
   }
 
   async function saveProfile() {
@@ -894,14 +1093,20 @@
     el.pfSave.disabled = true;
     el.pfErr.textContent = "";
     try {
-      const endpoint = S.me ? "/api/profile" : "/api/register";
-      const res = await fetch(endpoint, {
+      const res = await fetch("/api/profile", {
         method: "POST",
         credentials: "same-origin",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ name }),
       });
       const data = await res.json();
+      if (res.status === 409) {
+        el.pfNameNote.textContent = '"' + data.name + '" is already taken - try:';
+        el.pfNameNote.className = "name-note bad";
+        paintIdeas(data.suggestions);
+        el.pfErr.textContent = "pick a free name";
+        return;
+      }
       if (!res.ok) {
         el.pfErr.textContent = data.error || "could not save";
         return;
@@ -909,7 +1114,7 @@
       S.me = data.user;
       localStorage.setItem("cr_name", name);
 
-      const file = el.pfAvatar.files && el.pfAvatar.files[0];
+      const file = await croppedBlob();
       if (file) {
         const form = new FormData();
         form.append("file", file);
@@ -930,6 +1135,7 @@
           return;
         }
         S.me.avatar = upData.avatar_version;
+        closeCropper();
       }
       paintProfile();
       loadLeaderboard();
@@ -1122,7 +1328,10 @@
       }
     }
     S.output = st.output || "";
-    if (st.state === "waiting" || st.state === "countdown") hideRun();
+    if (st.state === "waiting" || st.state === "countdown") {
+      hideRun();
+      hideOutcome();
+    }
     paintGhosts();
     el.addBotBtn.classList.toggle(
       "hidden",
@@ -1137,6 +1346,7 @@
     renderRacers(st);
     if (st.state === "finished") {
       renderResults(st);
+      showOutcome(st);
       if (S.me) {
         loadLeaderboard();
         loadMe();  // the rating may have moved
@@ -1244,11 +1454,14 @@
             ? '<span class="' + (p.delta > 0 ? "up" : "down") + '">' +
               (p.delta > 0 ? "+" : "") + p.delta + "</span>"
             : '<span class="flat">-</span>';
+          const shown = p.bot
+            ? '<span class="nostars" title="bots type at a fixed accuracy">-</span>'
+            : starsHtml(p.stars || 0);
           const cells = timed
-            ? '<td class="stars">' + starsHtml(p.stars || 0) + "</td><td>" +
+            ? '<td class="stars">' + shown + "</td><td>" +
               (p.snips || 0) + "</td><td>" + (p.chars || 0) + "</td><td>" +
               Math.round(p.wpm) + "</td><td>" + Math.round(p.acc) + "%</td><td>" + delta + "</td>"
-            : '<td class="stars">' + starsHtml(p.stars || 0) + "</td><td>" +
+            : '<td class="stars">' + shown + "</td><td>" +
               Math.round(p.wpm) + "</td><td>" + Math.round(p.acc) + "%</td><td>" +
               (p.time != null ? p.time.toFixed(1) + "s" : "-") + "</td><td>" + delta + "</td>";
           return (
@@ -1296,7 +1509,8 @@
       div.className = "msg sys";
       div.textContent = m.text;
     } else {
-      div.className = "msg" + (m.id === S.pid ? " me" : "");
+      div.className =
+        "msg" + (m.id === S.pid ? " me" : "") + (m.bot ? " bot" : "");
       div.innerHTML =
         '<span class="avatar sm"></span><span class="who"></span><span class="body"></span>';
       paintAvatar(div.querySelector(".avatar"), m);
@@ -1317,11 +1531,18 @@
     card.type = "button";
     card.className = "bot-card";
     card.innerHTML =
+      '<span class="bot-art"></span>' +
       '<span class="avatar"></span>' +
       '<span class="bot-mid"><span class="bot-name"></span>' +
       '<span class="bot-blurb muted"></span></span>' +
       '<span class="bot-right"><b class="bot-rate"></b>' +
       '<span class="bot-rank muted"></span></span>';
+    if (bot.art) {
+      // the face crop, not the full card: the card art has text baked into it
+      card.querySelector(".bot-art").style.backgroundImage =
+        'url("/api/bot-avatar/' + bot.slug + '")';
+      card.classList.add("has-art");
+    }
     paintAvatar(card.querySelector(".avatar"), { bot: true, slug: bot.slug, name: bot.name });
     card.querySelector(".bot-name").textContent = bot.name;
     card.querySelector(".bot-blurb").textContent = bot.blurb;
@@ -1668,24 +1889,68 @@
   };
   el.leave.onclick = leave;
 
-  el.register.onclick = openProfile;
-  el.profileEdit.onclick = openProfile;
+  el.profileBtn.onclick = openProfile;
+  el.brand.onclick = (e) => {
+    e.preventDefault();
+    hideRanks();
+    if (S.room) leave();     // drop the lobby socket on the way out
+    else showHome();
+  };
   el.pfCancel.onclick = closeProfile;
   el.pfSave.onclick = saveProfile;
   el.pfRemove.onclick = removeAvatar;
-  el.pfAvatar.onchange = () => {
-    const file = el.pfAvatar.files && el.pfAvatar.files[0];
-    if (!file) return;
-    if (file.size > 512 * 1024) {
-      el.pfErr.textContent = "image is over 512 KB";
-      el.pfAvatar.value = "";
-      return;
-    }
-    el.pfErr.textContent = "";
-    el.pfPreview.style.backgroundImage = 'url("' + URL.createObjectURL(file) + '")';
-    el.pfPreview.textContent = "";
-    el.pfPreview.classList.add("has-img");
+  el.pfAvatar.onchange = () => openCropper(el.pfAvatar.files && el.pfAvatar.files[0]);
+  el.pfRecrop.onclick = closeCropper;
+  el.pfZoom.oninput = () => {
+    CROP.zoom = parseInt(el.pfZoom.value, 10) / 100;
+    drawCrop();
   };
+
+  // drag and drop, plus keyboard access on the drop zone
+  ["dragenter", "dragover"].forEach((evt) =>
+    el.pfDrop.addEventListener(evt, (e) => {
+      e.preventDefault();
+      el.pfDrop.classList.add("over");
+    })
+  );
+  ["dragleave", "drop"].forEach((evt) =>
+    el.pfDrop.addEventListener(evt, (e) => {
+      e.preventDefault();
+      el.pfDrop.classList.remove("over");
+    })
+  );
+  el.pfDrop.addEventListener("drop", (e) => {
+    const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    openCropper(file);
+  });
+  el.pfDrop.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      el.pfAvatar.click();
+    }
+  });
+
+  // drag the picture inside the crop window
+  el.pfStage.addEventListener("pointerdown", (e) => {
+    if (!CROP.img) return;
+    CROP.drag = { x: e.clientX, y: e.clientY };
+    el.pfStage.setPointerCapture(e.pointerId);
+  });
+  el.pfStage.addEventListener("pointermove", (e) => {
+    if (!CROP.drag || !CROP.img) return;
+    CROP.x += e.clientX - CROP.drag.x;
+    CROP.y += e.clientY - CROP.drag.y;
+    CROP.drag = { x: e.clientX, y: e.clientY };
+    drawCrop();
+  });
+  ["pointerup", "pointercancel"].forEach((evt) =>
+    el.pfStage.addEventListener(evt, () => { CROP.drag = null; })
+  );
+
+  el.pfName.addEventListener("input", () => {
+    clearTimeout(nameTimer);
+    nameTimer = setTimeout(checkName, 320);
+  });
   el.modal.onclick = (e) => {
     if (e.target === el.modal) closeProfile();
   };
@@ -1696,6 +1961,16 @@
   el.botCancel.onclick = closeBotPicker;
   el.botModal.onclick = (e) => {
     if (e.target === el.botModal) closeBotPicker();
+  };
+
+  el.winClose.onclick = hideOutcome;
+  el.winAgain.onclick = () => {
+    hideOutcome();
+    if (S.solo) loadSoloSnippet();
+    else send({ t: "restart" });
+  };
+  el.winModal.onclick = (e) => {
+    if (e.target === el.winModal) hideOutcome();
   };
 
   el.topicAll.onclick = () => {
@@ -1746,6 +2021,7 @@
   document.addEventListener("keydown", (e) => {
     if (!el.modal.classList.contains("hidden")) return;
     if (!el.botModal.classList.contains("hidden")) return;
+    if (!el.winModal.classList.contains("hidden")) return;
     if (!el.ranks.classList.contains("hidden")) return;
     if (document.activeElement === el.chatInput || document.activeElement === el.name ||
         document.activeElement === el.joinCode) return;
@@ -1755,6 +2031,7 @@
     if (e.key === "Escape" && document.activeElement === el.chatInput) focusTrap();
     if (e.key === "Escape" && !el.modal.classList.contains("hidden")) closeProfile();
     if (e.key === "Escape" && !el.botModal.classList.contains("hidden")) closeBotPicker();
+    if (e.key === "Escape" && !el.winModal.classList.contains("hidden")) hideOutcome();
     if (e.key === "Escape" && !el.ranks.classList.contains("hidden")) hideRanks();
   });
 

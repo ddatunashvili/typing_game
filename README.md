@@ -29,8 +29,11 @@ Open http://127.0.0.1:8000
 Every snippet is tagged with one level and one topic, so you can narrow what you get.
 
 - **Levels:** `very-easy` ("Really easy"), `easy`, `medium`, `hard` — graded by typing load
-  (symbol density, nesting, length). All 15 languages have snippets at every level, and each
-  level has at least 20 snippets across the languages (117 in total).
+  (symbol density, nesting, length). All 15 languages have snippets at every level.
+- Target is **20 snippets per level per language** (1,200). Python is complete at 80;
+  the rest still run on the original seed set, so the library is 187 today. New languages go
+  in `packs/<language>.py` as `(level, topic, code, output)` tuples and are merged
+  automatically, skipping anything already present.
 - **Topics:** `algorithms`, `data-structures`, `strings`, `math`, `async`, `web`, `oop`,
   `functional`, `errors`, `data`, `ui`, `devops`.
 - Picking nothing means *any*. Picking several is a union — `easy` + `hard` gives both.
@@ -71,6 +74,17 @@ sloppy run cannot coast on a round percentage:
 | 1 | accuracy >= 72% | Messy - lots of corrections |
 | 0 | below that, or unfinished | Rough one |
 
+**Winning the race is worth a star** on top (capped at 3), so out-typing everyone cannot
+score below a tidier opponent who covered a third of the distance. In timed mode the error
+rate is measured against the characters you actually covered, not one snippet's length.
+
+**Bots get no stars at all.** They type at a fixed synthetic accuracy, so a star rating for
+them would be meaningless and would flatter them against a real player; the results table
+shows a dash instead.
+
+When a race ends the winner (or loser) gets an outcome overlay: animated stars, who you beat
+or who beat you, your WPM, accuracy, place and rating change.
+
 Multiplayer races also move an **Elo rating** (start 1200, K-factor 24), scored pairwise
 against everyone in the lobby and averaged, so a crowded lobby is not worth more than a
 duel and beating someone stronger pays more. Bots and unregistered guests count as
@@ -102,10 +116,15 @@ UPDATE cr_snippets SET output = '>>> square(7)
 ## Bots
 
 Thirteen bot opponents from **Rubber Duck** (750, 18 wpm) to **Kernel Panic Kim**
-(2250, 138 wpm), each with a rating, a target speed and a deterministic identicon
-generated from its name (`/api/bot-avatar/{slug}.svg` - a mirrored 5x5 grid, no external
-service). They type at their target wpm with jitter and occasional hesitations rather than
-at a flat rate.
+(2250, 138 wpm), each with a rating and a target speed. They type at their target wpm with
+jitter and occasional hesitations rather than at a flat rate.
+
+Portraits come from `static/bots/`, imported with
+`python tools/import_bot_avatars.py <zip-or-folder>` - filenames map to slugs
+(`null_pointer_pete.png` to `null-pointer-pete`). The importer crops the middle band of the
+artwork for the round avatar, because the source cards have the blurb and rating printed
+across the top and bottom. Any bot without artwork falls back to a generated identicon
+(a mirrored 5x5 grid, no external service).
 
 Challenge one from the home screen, or add one mid-lobby with **+ bot**. Bots are always
 ready, so hitting **Ready** starts the race.
@@ -117,13 +136,28 @@ with their name on it. A caret that is ahead of yours pulses, so a rush is obvio
 only show for racers on the same snippet as you, which matters in timed mode where players
 drift apart in the playlist.
 
+## Bot trash talk
+
+Every bot has its own set of five rough one-liners and fires them into the lobby chat at
+random while it types - first jab a few seconds in, then every 6-13 seconds, never repeating
+within a race. They aim at your code and the clock, not at you. Lines live in `ROASTS` in
+`bots.py`.
+
 ## Profiles
 
 Optional — the game is fully playable without them, and everything below turns itself off
 when no database is configured.
 
-- **Register** in the top bar with a display name, and optionally a profile image you
-  upload yourself (png / jpeg / gif / webp, up to 512 KB).
+- **No sign-up.** Your first visit mints a profile automatically: a generated handle like
+  `QuantumRegex42`, a generated identicon and a rating of 1200. The top bar shows a
+  **profile button**, not a register button.
+- Open it to change your **name** or **avatar**. Names are unique: the dialog checks
+  availability as you type and, if the name is taken, offers free variations
+  (`Davit1`, `D_a_v_i_t`, `DavitDev`, `theDavit`, `Davit_`, `davit.exe`) as one-click chips.
+- The avatar picker takes a **drag-and-dropped** file or a click, then opens a **cropper**
+  with a circular guide, drag-to-reposition and a zoom slider. The square is rendered to a
+  256x256 WebP in the browser before upload, so the 512 KB cap is never the thing that
+  stops you.
 - You are **recognised automatically** on your next visit: registering sets a long-lived
   `HttpOnly` cookie holding a random token, and only the SHA-256 of that token is stored.
 - Avatars are kept in MySQL as BLOBs, not on disk — the panel replaces `/home/container`
@@ -167,6 +201,7 @@ layout does not jump when one appears.
 | --- | --- |
 | `main.py` | FastAPI app, lobby state machine, `/ws/{code}` websocket, REST API |
 | `snippets.py` | seed snippet library, tagged by language / level / topic |
+| `packs/` | per-language snippet packs; drop in a module and it is picked up |
 | `library.py` | reads snippets and settings from MySQL, falls back to the seed file |
 | `db.py` | MySQL: players, IP log, avatars, race history, snippets, settings |
 | `static/app.js` | typing engine, per-char highlighting, filters, profile, lobby client |
@@ -176,6 +211,7 @@ layout does not jump when one appears.
 | `bots.py` | bot roster and generated identicons |
 | `outputs.py` | demo transcripts for the simulated run panel |
 | `tools/make_assets.py` | regenerates the OG card and icons |
+| `tools/import_bot_avatars.py` | imports bot artwork from a zip or folder |
 | `deploy/nginx.conf` | reverse proxy with TLS, WebSocket upgrade and static caching |
 
 ## API
@@ -203,7 +239,9 @@ Accounts (all no-ops when no database is configured):
 - `GET /api/leaderboard?limit=10` — top players by rating
 - `GET /api/rankings?limit=50` — the rankings board, the viewer's own row, bots and tiers
 - `GET /api/bots` — the bot roster with ratings
-- `GET /api/bot-avatar/{slug}.svg` — generated bot identicon
+- `GET /api/bot-avatar/{slug}` — bot portrait (imported artwork, else a generated identicon)
+- `GET /api/bot-card/{slug}` — the full bot character-card illustration
+- `GET /api/name-check?name=x` — is this display name free, plus suggestions if not
 - `POST /api/race` — record a solo result (lobby races are recorded server-side)
 
 Websocket `WS /ws/{code}?name=&pid=&create=0|1&lang=&levels=&topics=&duration=`

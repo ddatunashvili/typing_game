@@ -114,11 +114,18 @@ input:focus, select:focus { border-color: #3d6ea8; }
 /* ---------- screens ---------- */
 .screen { flex: 1 1 auto; min-height: 0; }
 
-#screen-home {
+/* Any full screen scrolls when its content is taller than the viewport, and
+   only then. Without this the rankings page clipped instead of scrolling. */
+#screen-home,
+#screen-ranks {
   overflow-y: auto;
   overflow-x: hidden;
   scrollbar-gutter: stable;  /* no width jump when the bar appears */
 }
+
+/* Dialogs scroll too rather than overflowing a short window. */
+.modal { overflow-y: auto; }
+.modal-card { max-height: calc(100vh - 40px); overflow-y: auto; }
 
 /* ---------- home ---------- */
 .home-wrap {
@@ -795,4 +802,210 @@ input:focus, select:focus { border-color: #3d6ea8; }
   .rank-row { grid-template-columns: 26px 20px minmax(0, 1fr) auto; gap: 8px; font-size: 13px; }
   .rank-row .rk-title, .rank-row .rk-sub { display: none; }
   .bot-list { grid-template-columns: 1fr; }
+}
+
+/* ---------- logo ---------- */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: inherit;
+  text-decoration: none;
+  border-radius: 10px;
+  padding: 2px 6px 2px 2px;
+  transition: background .15s ease;
+}
+.brand:hover { background: #171b24; }
+.brand .logo { width: 32px; height: 32px; flex: 0 0 32px; display: block; }
+.brand-text { font-weight: 700; letter-spacing: .4px; font-size: 17px; }
+.brand-text em { font-style: normal; color: var(--accent); }
+
+/* ---------- profile button ---------- */
+button.profile {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px 5px 6px;
+  background: var(--panel-2);
+}
+button.profile:hover { background: #222736; }
+button.profile .pname {
+  font-weight: 600;
+  font-size: 14px;
+  max-width: 132px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- bot card artwork ---------- */
+.bot-card { position: relative; overflow: hidden; }
+.bot-art {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 58%;
+  background: right center / cover no-repeat;
+  opacity: .42;
+}
+/* fade the art out towards the text so the labels stay readable */
+.bot-card.has-art::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, var(--panel-2) 34%, rgba(26, 30, 40, .55) 70%,
+                              rgba(26, 30, 40, .25));
+}
+.bot-card.has-art > *:not(.bot-art) { position: relative; z-index: 1; }
+.bot-card.has-art:hover .bot-art { opacity: .45; }
+.bot-card .avatar { width: 40px; height: 40px; flex-basis: 40px; font-size: 16px; }
+
+@media (max-width: 620px) {
+  .brand-text { display: none; }
+  button.profile .pname { max-width: 84px; }
+}
+
+/* ---------- race outcome overlay ---------- */
+.win-card {
+  width: 100%;
+  max-width: 440px;
+  padding: 30px 26px 22px;
+  text-align: center;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: radial-gradient(circle at 50% -10%, #1a2430, var(--panel) 62%);
+  box-shadow: 0 22px 60px rgba(0, 0, 0, .6);
+  animation: pop .26s cubic-bezier(.2, 1.3, .5, 1);
+}
+.modal.won .win-card { border-color: #2d6446; }
+@keyframes pop { from { transform: scale(.9); opacity: 0; } }
+
+.win-stars { display: flex; justify-content: center; gap: 10px; margin-bottom: 14px; }
+.wstar {
+  font-size: 46px;
+  line-height: 1;
+  color: #262b38;
+  animation: none;
+}
+.wstar.on {
+  color: #ffc46b;
+  text-shadow: 0 0 24px rgba(255, 196, 107, .55);
+  animation: star-in .42s cubic-bezier(.2, 1.4, .4, 1) both;
+}
+@keyframes star-in {
+  from { transform: scale(.2) rotate(-35deg); opacity: 0; }
+  to   { transform: scale(1) rotate(0); opacity: 1; }
+}
+
+.win-card h3 { margin: 0 0 4px; font-size: 26px; letter-spacing: -.3px; }
+.modal.won .win-card h3 { color: var(--accent); }
+.win-sub { margin: 0 0 18px; color: var(--muted); font-size: 14px; }
+
+.win-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.win-stats > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 9px 4px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-2);
+}
+.win-stats b { font-family: var(--mono); font-size: 19px; color: var(--text); }
+.win-stats b.up { color: var(--accent); }
+.win-stats b.down { color: var(--bad); }
+.win-stats span {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--muted);
+}
+.win-card .modal-ctl { justify-content: center; }
+.nostars { color: var(--dim); font-family: var(--mono); }
+
+@media (max-width: 620px) {
+  .win-stats { grid-template-columns: repeat(2, 1fr); }
+  .wstar { font-size: 38px; }
+}
+
+/* ---------- name availability ---------- */
+.name-note { font-size: 11px; min-height: 14px; color: var(--muted); }
+.name-note.ok { color: var(--accent); }
+.name-note.bad { color: #ffc46b; }
+.ideas { display: flex; flex-wrap: wrap; gap: 6px; }
+.idea {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 3px 8px;
+  color: var(--accent-2);
+  border-color: #2f4767;
+  background: #101f33;
+}
+.idea:hover { background: #16304d; border-color: #3d6ea8; }
+
+/* ---------- avatar drop zone ---------- */
+.drop {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 20px 16px;
+  text-align: center;
+  border: 1px dashed #333b4d;
+  border-radius: 12px;
+  background: #11141b;
+  color: var(--muted);
+  cursor: pointer;
+  transition: border-color .15s ease, background .15s ease;
+}
+.drop:hover, .drop:focus-visible { border-color: #3d6ea8; background: #141926; outline: none; }
+.drop.over { border-color: var(--accent); background: #16241c; color: var(--accent); }
+.drop b { color: var(--text); font-size: 14px; }
+.drop .muted { font-size: 11px; }
+.drop-icon { width: 26px; height: 26px; color: var(--accent-2); }
+.drop-input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+
+/* ---------- cropper ---------- */
+.crop { display: flex; gap: 16px; align-items: flex-start; }
+.crop-stage {
+  position: relative;
+  width: 148px;
+  height: 148px;
+  flex: 0 0 148px;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #0b0d12;
+  cursor: grab;
+  touch-action: none;
+}
+.crop-stage:active { cursor: grabbing; }
+.crop-stage canvas { width: 100%; height: 100%; display: block; }
+/* circular guide showing what the avatar will actually look like */
+.crop-ring {
+  position: absolute;
+  inset: 8px;
+  border-radius: 50%;
+  border: 2px solid rgba(111, 227, 161, .85);
+  box-shadow: 0 0 0 999px rgba(11, 13, 18, .55);
+  pointer-events: none;
+}
+.crop-side { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.crop-zoom { display: flex; flex-direction: column; gap: 4px; font-size: 11px; }
+.crop-zoom input { width: 100%; accent-color: var(--accent); }
+.crop-side p { margin: 0; font-size: 11px; }
+
+/* ---------- bot trash talk ---------- */
+.msg.bot .who { color: #ffc46b; }
+.msg.bot .body { color: #e7d6b4; font-style: italic; }
+
+@media (max-width: 620px) {
+  .crop { flex-direction: column; align-items: stretch; }
+  .crop-stage { width: 100%; height: 220px; flex-basis: auto; }
 }

@@ -4,6 +4,7 @@ Each bot types at a target speed with a little jitter and the odd stumble, so a
 race against one feels less metronomic than a straight timer.
 """
 import hashlib
+import pathlib
 from typing import Dict, List, Optional
 
 import rating
@@ -130,7 +131,147 @@ BOTS: List[dict] = [
     },
 ]
 
+# Trash talk. Fired at random while a bot is typing - rough, but aimed at the
+# code and the clock, never at the person.
+ROASTS: Dict[str, List[str]] = {
+    "rubber-duck": [
+        "quack. that was your best line?",
+        "i float. you sink.",
+        "explain your bug to me. slowly. i have time.",
+        "i am a bath toy and i am still in this race.",
+        "take your time. i literally cannot drown.",
+    ],
+    "copy-paste-carl": [
+        "did you write that or did you remember it?",
+        "ctrl+c is a skill. yours is not.",
+        "i shipped this exact function nine times today.",
+        "no idea what this does. still faster than you.",
+        "the top answer never asks questions.",
+    ],
+    "off-by-one-olga": [
+        "you missed a character. i can tell from here.",
+        "i am always one short and still ahead of you.",
+        "arrays start at 0. your wpm starts lower.",
+        "one more keystroke. you can manage one, surely.",
+        "off by one. you are off by forty.",
+    ],
+    "semicolon-sam": [
+        "you forgot one. you always forget one.",
+        "i never miss a semicolon. you never hit a target.",
+        "that was a syntax error waiting to happen.",
+        "punctuation is not optional. neither is speed.",
+        "i can hear you hunting for the bracket key.",
+    ],
+    "tabs-mcspaces": [
+        "your indentation is a cry for help.",
+        "four spaces. or a tab. pick a side and type faster.",
+        "i have started wars over less than your formatting.",
+        "the linter is going to have a field day with you.",
+        "whitespace is free. your time is not.",
+    ],
+    "null-pointer-pete": [
+        "i checked for null. i did not check for competition.",
+        "your race is throwing. handle it.",
+        "somewhere a reference is pointing at your wpm. it is null.",
+        "dereference first. apologise later.",
+        "segmentation fault: your typing.",
+    ],
+    "merge-conflict-marge": [
+        "i would rebase your run but there is nothing worth keeping.",
+        "this is going to be a painful merge for you.",
+        "force push. it is the only way you are catching me.",
+        "i rebase on friday. you cannot beat me on a tuesday.",
+        "your branch is behind. by a lot.",
+    ],
+    "yaml-yolanda": [
+        "two spaces. two. it is not complicated.",
+        "your config is invalid and so is your pace.",
+        "i indent in my sleep and still type faster.",
+        "that keystroke was tabbed. i felt it.",
+        "no, the colon goes there. keep up.",
+    ],
+    "regex-randy": [
+        "i did that in one line. unreadable, but one line.",
+        "/^too slow$/ matches your run.",
+        "you type like you are escaping every character.",
+        "greedy match. that is what i am doing to this race.",
+        "i parsed HTML with a regex once. still faster than this.",
+    ],
+    "infinite-loop-ian": [
+        "while (true) { beat you }",
+        "no exit condition. no mercy.",
+        "i do not stop. that is the whole problem.",
+        "you will finish eventually. i will not.",
+        "your loop is the one that needs breaking.",
+    ],
+    "race-condition-rita": [
+        "i finished before you started. check the timestamps.",
+        "no locks. no waiting. no chance.",
+        "we both read the same snippet. only one of us wrote it.",
+        "this race is not thread safe and neither are you.",
+        "whoever commits first wins. that was me.",
+    ],
+    "segfault-sally": [
+        "core dumped. race still won.",
+        "i wrote past the end of the buffer and past you.",
+        "your stack is deeper than your skill.",
+        "free() called twice. your chances, once.",
+        "i crash. i just crash faster than you type.",
+    ],
+    "kernel-panic-kim": [
+        "i type in ring 0. you type in slow motion.",
+        "your process has been scheduled. behind mine.",
+        "i do not context switch. i just win.",
+        "panic: no route to victory for you.",
+        "uptime: 400 days. your lead: zero seconds.",
+    ],
+}
+
+GENERIC_ROASTS = [
+    "is that your typing speed or your loading screen?",
+    "the snippet is right there. all of it.",
+    "keep going. someone has to come second.",
+]
+
+
+def roasts(slug: str) -> List[str]:
+    return ROASTS.get((slug or "").strip().lower()) or GENERIC_ROASTS
+
+
 BY_SLUG: Dict[str, dict] = {b["slug"]: b for b in BOTS}
+
+# Hand-drawn artwork, dropped in by tools/import_bot_avatars.py. Any bot without
+# a file falls back to the generated identicon.
+ART_DIR = pathlib.Path(__file__).resolve().parent / "static" / "bots"
+ART_EXTS = (".webp", ".png", ".jpg", ".jpeg")
+ART_TYPES = {
+    ".webp": "image/webp",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+}
+
+
+def _find(stem: str) -> Optional[pathlib.Path]:
+    for ext in ART_EXTS:
+        candidate = ART_DIR / (stem + ext)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def art(slug: str) -> Optional[pathlib.Path]:
+    """The square avatar image for a bot, if one was imported."""
+    return _find((slug or "").strip().lower())
+
+
+def card_art(slug: str) -> Optional[pathlib.Path]:
+    """The full character-card illustration, if one was imported."""
+    return _find((slug or "").strip().lower() + "-card")
+
+
+def media_type(path: pathlib.Path) -> str:
+    return ART_TYPES.get(path.suffix.lower(), "application/octet-stream")
 
 # Avatar palette: picked to stay legible on the dark theme.
 PALETTE = [
@@ -148,6 +289,8 @@ PALETTE = [
 def public(bot: dict) -> dict:
     return {
         "slug": bot["slug"],
+        "art": art(bot["slug"]) is not None,
+        "card": card_art(bot["slug"]) is not None,
         "name": bot["name"],
         "rating": bot["rating"],
         "rank": rating.rank_for(bot["rating"]),

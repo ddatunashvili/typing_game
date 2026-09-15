@@ -329,6 +329,89 @@ def clean_name(name: str) -> str:
     return (name or "").strip()[:18]
 
 
+# Auto-generated handles for players who never picked a name.
+NAME_FIRST = (
+    "Swift", "Lazy", "Eager", "Bold", "Silent", "Turbo", "Async", "Nimble",
+    "Quantum", "Nocturnal", "Caffeinated", "Recursive", "Idempotent", "Atomic",
+    "Greedy", "Chaotic", "Stateless", "Immutable", "Blazing", "Feral",
+)
+NAME_SECOND = (
+    "Lambda", "Pointer", "Closure", "Monad", "Daemon", "Cursor", "Pixel",
+    "Kernel", "Regex", "Socket", "Buffer", "Thread", "Vector", "Token",
+    "Compiler", "Linter", "Falcon", "Otter", "Badger", "Comet",
+)
+
+
+def name_taken(name: str, ignore_id: Optional[int] = None) -> bool:
+    """True when someone else already uses this display name (case-insensitive)."""
+    if not _ready:
+        return False
+    row = _one(
+        """
+        SELECT COUNT(*) AS n FROM cr_users
+        WHERE LOWER(name) = LOWER(%s) AND (%s IS NULL OR id <> %s)
+        """,
+        (clean_name(name), ignore_id, ignore_id),
+    )
+    return bool((row or {}).get("n"))
+
+
+def name_suggestions(name: str, ignore_id: Optional[int] = None, count: int = 4) -> List[str]:
+    """Free variations on a taken name, in the order a person would try them."""
+    base = clean_name(name) or "Player"
+    stem = base[:16]
+    # Mixed styles, not just base1/base2/base3 - the numbered ones are the
+    # least interesting, so they go last.
+    ideas: List[str] = [
+        f"{stem}1",
+        "_".join(base),                    # d_a_v_i_d
+        base + "Dev",
+        f"the{base.capitalize()}",
+        base + "_",
+        base.lower() + ".exe",
+        base + "Codes",
+        f"{stem}42",
+        f"x{base}x",
+        base + "Types",
+        f"{stem}_dev",
+        f"{stem}404",
+    ]
+    for n in list(range(2, 10)) + [7, 99, 101, 2026]:
+        ideas.append(f"{stem}{n}")
+    ideas.append(random_name())
+
+    out: List[str] = []
+    seen = set()
+    for idea in ideas:
+        candidate = clean_name(idea)
+        key = candidate.lower()
+        if not candidate or key in seen or len(candidate) < 2:
+            continue
+        seen.add(key)
+        if name_taken(candidate, ignore_id):
+            continue
+        out.append(candidate)
+        if len(out) >= count:
+            break
+    return out
+
+
+def random_free_name(tries: int = 12) -> str:
+    """A generated handle nobody is using yet."""
+    for _ in range(tries):
+        candidate = random_name()
+        if not name_taken(candidate):
+            return candidate
+    return clean_name(random_name()[:14] + str(secrets.randbelow(900) + 100))
+
+
+def random_name() -> str:
+    """A readable handle like SwiftLambda42, short enough for the name column."""
+    first = secrets.choice(NAME_FIRST)
+    second = secrets.choice(NAME_SECOND)
+    return clean_name(f"{first}{second}{secrets.randbelow(90) + 10}")
+
+
 # ---------- profile ----------
 def public_user(row: dict) -> dict:
     score = int(row.get("rating") or rating.START_RATING)

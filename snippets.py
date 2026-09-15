@@ -1499,7 +1499,27 @@ echo "deploying ${tag} to ${env}"
 }
 
 
-# Demo transcripts for the simulated run panel (see outputs.py).
+# Per-language packs (see packs/). These carry their own demo output.
+import packs as _packs
+
+def _merge_packs() -> int:
+    added = 0
+    for language, entries in _packs.load().items():
+        pool = SNIPPETS.setdefault(language, [])
+        have = {item["code"] for item in pool}
+        for level, topic, code, output in entries:
+            built = snip(level, topic, code, output)
+            if built["code"] in have:
+                continue  # already present inline
+            have.add(built["code"])
+            pool.append(built)
+            added += 1
+    return added
+
+
+PACK_COUNT = _merge_packs()
+
+# Demo transcripts for anything still without one (see outputs.py).
 import outputs as _outputs
 
 DEMO_COUNT = _outputs.attach(SNIPPETS)
