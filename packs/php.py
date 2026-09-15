@@ -483,6 +483,30 @@ function sumOfSquares(array $numbers): int
 ''', r'''php > echo sumOfSquares([1, 2, 3]);
 14'''),
 
+    ("easy", "math", r"""
+<?php
+
+function sumTo(int $n): int
+{
+    return intdiv($n * ($n + 1), 2);
+}
+""", r"""php > echo sumTo(10);
+55"""),
+    ("easy", "data-structures", r"""
+<?php
+
+function mostCommon(array $items): ?string
+{
+    if ($items === []) {
+        return null;
+    }
+    $counts = array_count_values($items);
+    arsort($counts);
+    return (string) array_key_first($counts);
+}
+""", r"""php > echo mostCommon(["a", "b", "a"]);
+a"""),
+
     # ------------------------------------------------------------------- medium
     ("medium", "algorithms", r'''
 <?php
