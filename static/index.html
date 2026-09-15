@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>CodeRace — type real code</title>
+<link rel="preconnect" href="https://cdnjs.cloudflare.com" />
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" />
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand"><span class="dot"></span>CodeRace</div>
+  <div class="top-right">
+    <label class="name-field">
+      <span>name</span>
+      <input id="nameInput" maxlength="18" placeholder="Guest" autocomplete="off" />
+    </label>
+    <button id="leaveBtn" class="ghost hidden">leave</button>
+  </div>
+</header>
+
+<!-- HOME -->
+<main id="screen-home" class="screen">
+  <div class="home-wrap">
+    <h1>Type real code. Race your friends.</h1>
+    <p class="sub">Pick a language, get a syntax-highlighted snippet, beat everyone to the last semicolon.</p>
+
+    <section class="panel">
+      <h2>language</h2>
+      <div id="langGrid" class="lang-grid"></div>
+    </section>
+
+    <section class="actions">
+      <button id="soloBtn" class="primary big">Practice solo</button>
+      <button id="createBtn" class="accent big">Create lobby</button>
+      <form id="joinForm" class="join">
+        <input id="joinCode" maxlength="5" placeholder="CODE" autocomplete="off" />
+        <button class="ghost big" type="submit">Join</button>
+      </form>
+    </section>
+    <p id="homeErr" class="err"></p>
+  </div>
+</main>
+
+<!-- LOBBY / RACE -->
+<main id="screen-room" class="screen hidden">
+  <aside class="chat">
+    <div class="chat-head">
+      <span>chat</span>
+      <span id="roomCode" class="room-code"></span>
+    </div>
+    <div id="chatLog" class="chat-log"></div>
+    <form id="chatForm" class="chat-form">
+      <input id="chatInput" placeholder="message…" maxlength="400" autocomplete="off" />
+      <button type="submit">↵</button>
+    </form>
+  </aside>
+
+  <section class="main">
+    <div class="room-top">
+      <div class="room-meta">
+        <span class="label">lobby</span>
+        <button id="copyLink" class="code-pill" title="copy invite link"><span id="codeText">-----</span> ⧉</button>
+        <select id="langSelect" class="lang-select"></select>
+      </div>
+      <div class="room-ctl">
+        <span id="stateBadge" class="badge">waiting</span>
+        <button id="readyBtn" class="primary">Ready</button>
+        <button id="startBtn" class="accent hidden">Start race</button>
+        <button id="againBtn" class="ghost hidden">Race again</button>
+      </div>
+    </div>
+
+    <div id="racers" class="racers"></div>
+
+    <div class="stage">
+      <div id="countdown" class="countdown hidden"><span id="countNum">5</span></div>
+      <div class="hud">
+        <div class="hud-item"><b id="hudWpm">0</b><span>wpm</span></div>
+        <div class="hud-item"><b id="hudAcc">100%</b><span>acc</span></div>
+        <div class="hud-item"><b id="hudTime">0.0s</b><span>time</span></div>
+        <div class="hud-item"><b id="hudLeft">0</b><span>left</span></div>
+      </div>
+      <div id="codeBox" class="code-box"><pre id="codeArea" class="code-area"></pre></div>
+      <input id="trap" class="trap" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+      <p id="hint" class="hint">click here and start typing — indentation is auto-skipped</p>
+    </div>
+
+    <div id="results" class="results hidden"></div>
+  </section>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-clike.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-markup.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-css.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-javascript.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-typescript.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-python.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-go.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-rust.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-java.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-c.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-cpp.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-csharp.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-markup-templating.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-php.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-ruby.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
