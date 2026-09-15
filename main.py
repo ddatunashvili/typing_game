@@ -226,6 +226,10 @@ class Lobby:
         self.ends_at: float = 0.0
         self.snip: dict = {}
         self.playlist: List[dict] = []
+        self.bag = library.Bag()
+        # once a race has a level, later snippets stick to it until the
+        # filters change, so difficulty does not jump around mid-session
+        self.level_lock: Optional[str] = None
         self.reroll()  # fills snip + playlist to match the mode
         self.players: Dict[str, Player] = {}
         self.order: List[str] = []
@@ -247,8 +251,12 @@ class Lobby:
             )
             self.snip = self.playlist[0]
         else:
-            self.snip = pick_snippet(self.language, avoid, self.levels, self.topics)
+            # shuffled deck, pinned to the level this lobby is already on
+            self.snip = self.bag.deal(
+                self.language, self.levels, self.topics, self.level_lock
+            )
             self.playlist = [self.snip]
+        self.level_lock = self.snip.get("level") or None
 
     def snapshot(self) -> dict:
         return {
@@ -430,16 +438,18 @@ async def api_snippet(
     avoid: str = "",
     levels: str = "",
     topics: str = "",
+    level: str = "",
 ):
     wanted_levels = parse_ids(levels, LEVEL_IDS)
     wanted_topics = parse_ids(topics, TOPIC_IDS)
-    chosen = pick_snippet(lang, avoid, wanted_levels, wanted_topics)
+    pinned = level if level in LEVEL_IDS else None
+    chosen = pick_snippet(lang, avoid, wanted_levels, wanted_topics, pinned)
     return {
         "language": lang,
         "snippet": chosen["code"],
         "level": chosen["level"],
         "topic": chosen["topic"],
-        "matches": count_matching(lang, wanted_levels, wanted_topics),
+        "matches": count_matching(lang, wanted_levels, wanted_topics, pinned),
     }
 
 
@@ -449,10 +459,13 @@ async def api_playlist(
     size: int = 12,
     levels: str = "",
     topics: str = "",
+    level: str = "",
 ):
     """An ordered run of snippets, for a timed solo session."""
     wanted_levels = parse_ids(levels, LEVEL_IDS)
     wanted_topics = parse_ids(topics, TOPIC_IDS)
+    if level in LEVEL_IDS:
+        wanted_levels = [level]
     run = library.playlist(lang, size, wanted_levels, wanted_topics)
     return {
         "language": lang,
@@ -758,6 +771,7 @@ async def ws_lobby(
                 value = str(msg.get("v", "python"))
                 if value in LANGUAGE_IDS:
                     lobby.language = value
+                    lobby.level_lock = None
                     lobby.reroll()
                     await lobby.push_state()
                     await lobby.system("language set to " + value)
@@ -767,6 +781,7 @@ async def ws_lobby(
                     continue
                 lobby.levels = clean_ids(msg.get("levels"), LEVEL_IDS)
                 lobby.topics = clean_ids(msg.get("topics"), TOPIC_IDS)
+                lobby.level_lock = None  # a new filter may mean a new level
                 lobby.reroll()
                 await lobby.push_state()
                 await lobby.system(
@@ -793,8 +808,16 @@ async def ws_lobby(
                     await lobby.start_race()
 
             elif kind == "again":
+                # Swap in a different snippet and go back to the waiting room.
                 if pid == lobby.host:
+                    lobby.reroll(avoid=lobby.snip.get("code", ""))
                     await lobby.reset_to_lobby()
+                    await lobby.system("new snippet loaded")
+
+            elif kind == "restart":
+                # Straight into another race on a different snippet.
+                if pid == lobby.host and lobby.state in ("waiting", "finished"):
+                    await lobby.start_race()
 
             elif kind == "progress":
                 if lobby.state != "racing" or player.finished:

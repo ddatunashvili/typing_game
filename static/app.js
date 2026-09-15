@@ -52,6 +52,7 @@
     ready: $("readyBtn"),
     start: $("startBtn"),
     again: $("againBtn"),
+    newSnip: $("newSnipBtn"),
     racers: $("racers"),
     countdown: $("countdown"),
     countNum: $("countNum"),
@@ -101,6 +102,7 @@
     lobby: null,
     snipLevel: "",
     snipTopic: "",
+    soloLevel: "",  // level the solo session is pinned to
     duration: null, // null until /api/meta supplies the default
   };
 
@@ -930,14 +932,23 @@
     const me = st.players.find((p) => p.id === S.pid);
     el.ready.classList.toggle("hidden", st.state !== "waiting");
     el.start.classList.toggle("hidden", !(isHost && st.state === "waiting"));
-    el.again.classList.toggle("hidden", !(isHost && st.state === "finished"));
+    const over = st.state === "finished";
+    el.again.classList.toggle("hidden", !(isHost && over));
+    el.newSnip.classList.toggle("hidden", !(isHost && over));
+    if (over) {
+      el.again.textContent = "Race again";
+      el.hint.textContent = isHost
+        ? "Race again for a fresh snippet, or Another snippet to pick one without starting"
+        : "waiting for the host to start the next race…";
+    }
     if (me) {
       el.ready.textContent = me.ready ? "Unready" : "Ready";
       el.ready.classList.toggle("accent", !!me.ready);
     }
 
-    // A fresh race (or a filter change while waiting) resets the whole run.
-    const armed = st.state === "countdown" || st.state === "racing";
+    // Only a running race is off limits: during the countdown we want the new
+    // snippet on screen already, so players can read ahead.
+    const armed = st.state === "racing";
     if (!armed && (!prev || prev.state !== st.state || prev.snippet !== st.snippet)) {
       initRun(st.duration > 0, st.playlist || []);
     }
@@ -1146,6 +1157,7 @@
     el.ready.classList.toggle("hidden", S.solo);
     el.start.classList.toggle("hidden", S.solo);
     el.filterBtn.classList.toggle("hidden", S.solo);
+    el.newSnip.classList.toggle("hidden", S.solo);
     document.querySelector(".room-meta").classList.toggle("hidden", S.solo);
     focusTrap();
   }
@@ -1153,10 +1165,36 @@
   async function startSolo() {
     S.solo = true;
     S.room = "solo";
+    S.soloLevel = "";  // the first draw may be any selected level
+    SOLO.deck = [];
+    SOLO.key = "";
     el.stateBadge.textContent = "solo";
     el.stateBadge.className = "badge racing";
     showRoom();
     await loadSoloSnippet();
+  }
+
+  /* Solo classic: a shuffled deck fetched once, then walked one at a time. */
+  const SOLO = { deck: [], key: "" };
+
+  function soloKey() {
+    return [S.lang, S.levels.join("+"), S.topics.join("+"), S.soloLevel || ""].join("|");
+  }
+
+  async function soloNext() {
+    const key = soloKey();
+    if (key !== SOLO.key || !SOLO.deck.length) {
+      const qs =
+        "lang=" + encodeURIComponent(S.lang) +
+        "&size=40" +
+        (S.soloLevel ? "&level=" + encodeURIComponent(S.soloLevel) : "") +
+        (filterQuery() ? "&" + filterQuery() : "");
+      const res = await fetch("/api/playlist?" + qs);
+      const data = await res.json();
+      SOLO.deck = data.playlist || [];
+      SOLO.key = key;
+    }
+    return SOLO.deck.shift();
   }
 
   async function loadSoloSnippet() {
@@ -1171,6 +1209,10 @@
       const res = await fetch("/api/playlist?" + qs);
       const data = await res.json();
       initRun(true, data.playlist || []);
+      if (!R.playlist.length) {
+        el.hint.textContent = "no snippet matched those filters";
+        return;
+      }
       el.again.textContent = "Run again";
       const first = R.playlist[0];
       paintSnipMeta(first.level, first.topic);
@@ -1179,16 +1221,17 @@
       return;
     }
 
-    const qs =
-      "lang=" + encodeURIComponent(S.lang) +
-      "&avoid=" + encodeURIComponent(T.code) +
-      (filterQuery() ? "&" + filterQuery() : "");
-    const res = await fetch("/api/snippet?" + qs);
-    const data = await res.json();
+    const next = await soloNext();
     initRun(false, []);
     el.again.textContent = "New snippet";
-    paintSnipMeta(data.level, data.topic);
-    renderCode(data.snippet, S.lang);
+    if (!next) {
+      el.hint.textContent = "no snippet matched those filters";
+      return;
+    }
+    // stay on this level from now on
+    S.soloLevel = next.level;
+    paintSnipMeta(next.level, next.topic);
+    renderCode(next.code, S.lang);
     armRace();
   }
 
@@ -1332,7 +1375,8 @@
     send({ t: "ready", v: !(me && me.ready) });
   };
   el.start.onclick = () => send({ t: "start" });
-  el.again.onclick = () => (S.solo ? loadSoloSnippet() : send({ t: "again" }));
+  el.again.onclick = () => (S.solo ? loadSoloSnippet() : send({ t: "restart" }));
+  el.newSnip.onclick = () => (S.solo ? loadSoloSnippet() : send({ t: "again" }));
   el.langSelect.onchange = () => {
     setLang(el.langSelect.value);
     if (!S.solo) send({ t: "lang", v: el.langSelect.value });

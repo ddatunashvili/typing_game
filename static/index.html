@@ -38,31 +38,33 @@
       <div id="langGrid" class="lang-grid"></div>
     </section>
 
-    <section class="panel">
-      <h2>level <span id="levelHint" class="muted"></span></h2>
-      <div id="levelChips" class="chips"></div>
-    </section>
+    <div class="opt-grid">
+      <section class="panel">
+        <h2>level <span id="levelHint" class="muted"></span></h2>
+        <div id="levelChips" class="chips"></div>
+      </section>
 
-    <section class="panel">
-      <h2>
-        topics <span id="topicHint" class="muted"></span>
-        <span class="head-actions">
-          <button id="topicAll" class="link" type="button">all</button>
-          <button id="topicNone" class="link" type="button">none</button>
-        </span>
-      </h2>
-      <div id="topicChips" class="chips"></div>
-      <p id="filterWarn" class="warn hidden"></p>
-    </section>
+      <section class="panel opt-wide">
+        <h2>
+          topics <span id="topicHint" class="muted"></span>
+          <span class="head-actions">
+            <button id="topicAll" class="link" type="button">all</button>
+            <button id="topicNone" class="link" type="button">none</button>
+          </span>
+        </h2>
+        <div id="topicChips" class="chips"></div>
+        <p id="filterWarn" class="warn hidden"></p>
+      </section>
 
-    <section class="panel">
-      <h2>race time <span id="durationHint" class="muted"></span></h2>
-      <div id="durationChips" class="chips"></div>
-      <p class="muted">
-        Timed: when you finish a snippet and the clock is still running, the next one
-        appears. Ranking is by characters typed.
-      </p>
-    </section>
+      <section class="panel">
+        <h2>race time <span id="durationHint" class="muted"></span></h2>
+        <div id="durationChips" class="chips"></div>
+        <p class="muted">
+          Finish a snippet while the clock runs and the next one appears.
+          Ranking is by characters typed.
+        </p>
+      </section>
+    </div>
 
     <section class="actions">
       <button id="soloBtn" class="primary big">Practice solo</button>
@@ -108,7 +110,8 @@
         <span id="stateBadge" class="badge">waiting</span>
         <button id="readyBtn" class="primary">Ready</button>
         <button id="startBtn" class="accent hidden">Start race</button>
-        <button id="againBtn" class="ghost hidden">Race again</button>
+        <button id="againBtn" class="accent hidden">Race again</button>
+        <button id="newSnipBtn" class="ghost hidden">Another snippet</button>
       </div>
     </div>
 

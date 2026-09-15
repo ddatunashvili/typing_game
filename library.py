@@ -123,10 +123,17 @@ def pool_for(
     language: str,
     levels_filter: Optional[Iterable[str]] = None,
     topics_filter: Optional[Iterable[str]] = None,
+    level: Optional[str] = None,
 ) -> List[dict]:
-    """Snippets matching the filters, falling back to the whole language."""
+    """Snippets matching the filters, falling back to the whole language.
+
+    `level` pins one exact level, which is how a race keeps handing out
+    snippets of the same difficulty.
+    """
     library = all_snippets()
     pool = library.get(language) or library.get("python") or SNIPPETS["python"]
+    if level:
+        levels_filter = [level]
     wanted_levels = set(clean_ids(levels_filter, LEVEL_IDS))
     wanted_topics = set(clean_ids(topics_filter, TOPIC_IDS))
     matches = [
@@ -143,11 +150,51 @@ def pick_snippet(
     avoid: str = "",
     levels_filter: Optional[Iterable[str]] = None,
     topics_filter: Optional[Iterable[str]] = None,
+    level: Optional[str] = None,
 ) -> dict:
     """A random snippet dict: {code, level, topic}."""
-    pool = pool_for(language, levels_filter, topics_filter)
+    pool = pool_for(language, levels_filter, topics_filter, level)
     options = [s for s in pool if s["code"] != avoid] or pool
     return random.choice(options)
+
+
+class Bag:
+    """Deals snippets without repeats: shuffle, deal one at a time, reshuffle.
+
+    A plain random pick can show the same snippet twice in a row; this walks a
+    shuffled deck instead, so every snippet in the pool comes up once before any
+    of them repeats.
+    """
+
+    def __init__(self) -> None:
+        self._queue: List[dict] = []
+        self._key: Optional[tuple] = None
+        self._last: Optional[str] = None
+
+    def deal(
+        self,
+        language: str,
+        levels_filter: Optional[Iterable[str]] = None,
+        topics_filter: Optional[Iterable[str]] = None,
+        level: Optional[str] = None,
+    ) -> dict:
+        key = (
+            language,
+            tuple(clean_ids(levels_filter, LEVEL_IDS)),
+            tuple(clean_ids(topics_filter, TOPIC_IDS)),
+            level or "",
+        )
+        if key != self._key or not self._queue:
+            pool = pool_for(language, levels_filter, topics_filter, level)
+            self._queue = pool[:]
+            random.shuffle(self._queue)
+            self._key = key
+            # avoid dealing the same snippet twice across a reshuffle
+            if len(self._queue) > 1 and self._queue[-1]["code"] == self._last:
+                self._queue.insert(0, self._queue.pop())
+        item = self._queue.pop()
+        self._last = item["code"]
+        return item
 
 
 def playlist(
@@ -175,10 +222,13 @@ def count_matching(
     language: str,
     levels_filter: Optional[Iterable[str]] = None,
     topics_filter: Optional[Iterable[str]] = None,
+    level: Optional[str] = None,
 ) -> int:
     """How many snippets actually match - 0 means the filters fell back."""
     library = all_snippets()
     pool = library.get(language) or []
+    if level:
+        levels_filter = [level]
     wanted_levels = set(clean_ids(levels_filter, LEVEL_IDS))
     wanted_topics = set(clean_ids(topics_filter, TOPIC_IDS))
     return sum(

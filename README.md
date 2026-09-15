@@ -18,6 +18,9 @@ Open http://127.0.0.1:8000
   **Practice solo** or **Create lobby**.
 - Share the invite link (the code pill copies it) or the 5-char code — friends paste it into **Join**.
 - Host presses **Start race**; a race also auto-starts when everyone is Ready.
+- The upcoming snippet is on screen during the countdown, so you can read ahead.
+- When a race ends the host gets **Race again** (straight into another race on a new snippet)
+  and **Another snippet** (swap the snippet without starting).
 - 5s countdown, then everyone types the same snippet. Chat lives in the left panel.
 - Live WPM / accuracy / progress bars per player, results table with placements.
 
@@ -31,6 +34,10 @@ Every snippet is tagged with one level and one topic, so you can narrow what you
 - **Topics:** `algorithms`, `data-structures`, `strings`, `math`, `async`, `web`, `oop`,
   `functional`, `errors`, `data`, `ui`, `devops`.
 - Picking nothing means *any*. Picking several is a union — `easy` + `hard` gives both.
+- Snippets are dealt from a **shuffled deck**, not picked at random: every snippet in the pool
+  comes up once before any repeats, and never twice in a row.
+- Once a race has a level, later snippets **stay on that level**, so difficulty does not jump
+  between rounds. Changing the language or the level/topic filters releases the lock.
 - Chips show how many snippets each choice has for the current language, and topics the
   language has nothing for are hidden (SQL has no `async` snippets, for instance).
 - If a combination matches nothing, the app says so and falls back to a random snippet from
@@ -68,6 +75,15 @@ when no database is configured.
 - IP addresses are stored per player (last seen, plus a per-IP hit log). That is personal
   data — make sure that is what you want before deploying publicly.
 
+## Layout
+
+The page centres on a **1300px** column on a desktop and reflows down from there: the
+level / topics / race-time panels sit in one row on a wide screen, drop to two columns
+below 1100px and stack below 820px, where the lobby chat moves underneath the race instead
+of beside it. Below 620px the racer rows put the progress bar on its own line and the action
+buttons go full width. Scrollbars are restyled thin and dark, with a stable gutter so the
+layout does not jump when one appears.
+
 ## Typing rules
 
 - Wrong key marks the character red and blocks — press the right key or Backspace.
@@ -93,7 +109,8 @@ Catalog and snippets:
 
 - `GET /api/meta` — languages, levels, topics and per-language counts (incl. level×topic)
 - `GET /api/languages` — language list
-- `GET /api/snippet?lang=python&levels=easy,hard&topics=math` — random snippet + its tags
+- `GET /api/snippet?lang=python&levels=easy,hard&topics=math&level=easy` — one snippet + its
+  tags; `level` pins an exact level
 - `GET /api/playlist?lang=python&size=12&levels=&topics=` — an ordered run, for timed solo
 - `GET /api/config` — effective settings and where the library is being read from
 - `GET /api/lobby/new?lang=python&levels=&topics=&duration=60` — create lobby, returns code
@@ -113,8 +130,8 @@ Accounts (all no-ops when no database is configured):
 
 Websocket `WS /ws/{code}?name=&pid=&create=0|1&lang=&levels=&topics=&duration=`
 
-Client → server: `chat`, `ready`, `start`, `again`, `lang`, `filters`, `duration`,
-`progress`, `finish`
+Client → server: `chat`, `ready`, `start`, `restart`, `again`, `lang`, `filters`,
+`duration`, `progress`, `finish` — `again` swaps the snippet, `restart` starts another race
 Server → client: `hello`, `state`, `chat`, `countdown`, `go`, `prog`, `time_up`, `error`
 
 ## Where the snippets live
