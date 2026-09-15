@@ -1877,34 +1877,45 @@
     connect(code.toUpperCase(), false);
   }
 
+  /* A missing element used to throw here and abort the rest of the wiring,
+     which left the whole page dead. Warn and carry on instead - usually it
+     means a cached app.js is paired with newer markup. */
+  function on(node, event, handler) {
+    if (!node) {
+      console.warn("CodeRace: no element to bind " + event + " to");
+      return;
+    }
+    node.addEventListener(event, handler);
+  }
+
   el.name.value = S.name || "";
   el.name.addEventListener("change", () => localStorage.setItem("cr_name", el.name.value.trim()));
 
-  el.solo.onclick = startSolo;
-  el.create.onclick = createLobby;
-  el.joinForm.onsubmit = (e) => {
+  on(el.solo, "click", startSolo);
+  on(el.create, "click", createLobby);
+  on(el.joinForm, "submit", (e) => {
     e.preventDefault();
     const code = el.joinCode.value.trim();
     if (code.length >= 4) joinLobby(code);
-  };
-  el.leave.onclick = leave;
+  });
+  on(el.leave, "click", leave);
 
-  el.profileBtn.onclick = openProfile;
-  el.brand.onclick = (e) => {
+  on(el.profileBtn, "click", openProfile);
+  on(el.brand, "click", (e) => {
     e.preventDefault();
     hideRanks();
     if (S.room) leave();     // drop the lobby socket on the way out
     else showHome();
-  };
-  el.pfCancel.onclick = closeProfile;
-  el.pfSave.onclick = saveProfile;
-  el.pfRemove.onclick = removeAvatar;
-  el.pfAvatar.onchange = () => openCropper(el.pfAvatar.files && el.pfAvatar.files[0]);
-  el.pfRecrop.onclick = closeCropper;
-  el.pfZoom.oninput = () => {
+  });
+  on(el.pfCancel, "click", closeProfile);
+  on(el.pfSave, "click", saveProfile);
+  on(el.pfRemove, "click", removeAvatar);
+  on(el.pfAvatar, "change", () => openCropper(el.pfAvatar.files && el.pfAvatar.files[0]));
+  on(el.pfRecrop, "click", closeCropper);
+  on(el.pfZoom, "input", () => {
     CROP.zoom = parseInt(el.pfZoom.value, 10) / 100;
     drawCrop();
-  };
+  });
 
   // drag and drop, plus keyboard access on the drop zone
   ["dragenter", "dragover"].forEach((evt) =>
@@ -1951,72 +1962,72 @@
     clearTimeout(nameTimer);
     nameTimer = setTimeout(checkName, 320);
   });
-  el.modal.onclick = (e) => {
+  on(el.modal, "click", (e) => {
     if (e.target === el.modal) closeProfile();
-  };
+  });
 
-  el.ranksBtn.onclick = () => (el.ranks.classList.contains("hidden") ? showRanks() : hideRanks());
-  el.ranksBack.onclick = hideRanks;
-  el.addBotBtn.onclick = openBotPicker;
-  el.botCancel.onclick = closeBotPicker;
-  el.botModal.onclick = (e) => {
+  on(el.ranksBtn, "click", () => (el.ranks.classList.contains("hidden") ? showRanks() : hideRanks()));
+  on(el.ranksBack, "click", hideRanks);
+  on(el.addBotBtn, "click", openBotPicker);
+  on(el.botCancel, "click", closeBotPicker);
+  on(el.botModal, "click", (e) => {
     if (e.target === el.botModal) closeBotPicker();
-  };
+  });
 
-  el.winClose.onclick = hideOutcome;
-  el.winAgain.onclick = () => {
+  on(el.winClose, "click", hideOutcome);
+  on(el.winAgain, "click", () => {
     hideOutcome();
     if (S.solo) loadSoloSnippet();
     else send({ t: "restart" });
-  };
-  el.winModal.onclick = (e) => {
+  });
+  on(el.winModal, "click", (e) => {
     if (e.target === el.winModal) hideOutcome();
-  };
+  });
 
-  el.topicAll.onclick = () => {
+  on(el.topicAll, "click", () => {
     const cat = catalogFor(S.lang);
     S.topics = cat ? Object.keys(cat.topics) : [];
     saveFilters();
     renderFilters();
-  };
-  el.topicNone.onclick = () => {
+  });
+  on(el.topicNone, "click", () => {
     S.topics = [];
     saveFilters();
     renderFilters();
-  };
+  });
 
-  el.filterBtn.onclick = () => {
+  on(el.filterBtn, "click", () => {
     el.roomFilters.classList.toggle("hidden");
     if (S.lobby) renderRoomFilters(S.lobby);
-  };
+  });
 
-  el.chatForm.onsubmit = (e) => {
+  on(el.chatForm, "submit", (e) => {
     e.preventDefault();
     const text = el.chatInput.value.trim();
     if (!text) return;
     send({ t: "chat", text });
     el.chatInput.value = "";
     focusTrap();
-  };
+  });
 
-  el.ready.onclick = () => {
+  on(el.ready, "click", () => {
     const me = S.lobby && S.lobby.players.find((p) => p.id === S.pid);
     send({ t: "ready", v: !(me && me.ready) });
-  };
-  el.start.onclick = () => send({ t: "start" });
-  el.again.onclick = () => (S.solo ? loadSoloSnippet() : send({ t: "restart" }));
-  el.newSnip.onclick = () => (S.solo ? loadSoloSnippet() : send({ t: "again" }));
-  el.langSelect.onchange = () => {
+  });
+  on(el.start, "click", () => send({ t: "start" }));
+  on(el.again, "click", () => (S.solo ? loadSoloSnippet() : send({ t: "restart" })));
+  on(el.newSnip, "click", () => (S.solo ? loadSoloSnippet() : send({ t: "again" })));
+  on(el.langSelect, "change", () => {
     setLang(el.langSelect.value);
     if (!S.solo) send({ t: "lang", v: el.langSelect.value });
-  };
-  el.copyLink.onclick = () => {
+  });
+  on(el.copyLink, "click", () => {
     navigator.clipboard.writeText(location.origin + "/?l=" + (S.room || ""));
     el.copyLink.classList.add("accent");
     setTimeout(() => el.copyLink.classList.remove("accent"), 600);
-  };
+  });
 
-  el.codeBox.onclick = focusTrap;
+  on(el.codeBox, "click", focusTrap);
   el.trap.addEventListener("blur", () => el.codeBox.classList.remove("focus"));
   document.addEventListener("keydown", (e) => {
     if (!el.modal.classList.contains("hidden")) return;

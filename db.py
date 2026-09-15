@@ -173,6 +173,18 @@ SCHEMA = (
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """
+    CREATE TABLE IF NOT EXISTS cr_tokens (
+        token CHAR(64) NOT NULL,
+        user_id INT UNSIGNED NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (token),
+        KEY idx_cr_tokens_user (user_id),
+        CONSTRAINT fk_cr_token_user FOREIGN KEY (user_id)
+            REFERENCES cr_users (id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
     CREATE TABLE IF NOT EXISTS cr_user_ips (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
         user_id INT UNSIGNED NOT NULL,
@@ -430,16 +442,73 @@ def public_user(row: dict) -> dict:
     }
 
 
+PROFILE_COLUMNS = """
+        id, name, avatar_mime, avatar_version, races, best_wpm, best_acc,
+        rating, wins, stars
+"""
+
+
 def find_by_token(token: str) -> Optional[dict]:
+    """The account for a cookie. Checks cr_tokens, then the original column."""
     if not _ready or not token:
         return None
+    hashed = hash_token(token)
+    row = _one(
+        """
+        SELECT u.id, u.name, u.avatar_mime, u.avatar_version, u.races,
+               u.best_wpm, u.best_acc, u.rating, u.wins, u.stars
+        FROM cr_tokens AS t
+        JOIN cr_users AS u ON u.id = t.user_id
+        WHERE t.token = %s
+        """,
+        (hashed,),
+    )
+    if row is not None:
+        _exec(
+            "UPDATE cr_tokens SET last_seen_at = CURRENT_TIMESTAMP WHERE token = %s",
+            (hashed,),
+        )
+        return row
     return _one(
         """
         SELECT id, name, avatar_mime, avatar_version, races, best_wpm, best_acc,
                rating, wins, stars
         FROM cr_users WHERE token = %s
         """,
-        (hash_token(token),),
+        (hashed,),
+    )
+
+
+def add_token(user_id: int) -> str:
+    """Issue another cookie for an existing account, keeping the old ones valid."""
+    token = new_token()
+    _exec(
+        "INSERT INTO cr_tokens (token, user_id) VALUES (%s, %s)",
+        (hash_token(token), user_id),
+    )
+    return token
+
+
+def find_by_ip(ip: str) -> Optional[dict]:
+    """The account most recently seen from this IP address.
+
+    Used to re-attach a visitor who has lost their cookie. Note that everyone
+    behind one NAT shares an address, so this cannot distinguish people in the
+    same household or office.
+    """
+    if not _ready or not ip:
+        return None
+    return _one(
+        """
+        SELECT u.id, u.name, u.avatar_mime, u.avatar_version, u.races,
+               u.best_wpm, u.best_acc, u.rating, u.wins, u.stars
+        FROM cr_user_ips AS p
+        JOIN cr_users AS u ON u.id = p.user_id
+        WHERE p.ip = %s
+        ORDER BY p.last_seen_at DESC
+        LIMIT 1
+        """,
+        (ip[:45],),
     )
 
 
@@ -449,6 +518,10 @@ def register(name: str, ip: str) -> Tuple[str, dict]:
     user_id = _exec(
         "INSERT INTO cr_users (token, name, last_ip) VALUES (%s, %s, %s)",
         (hash_token(token), clean_name(name) or "Guest", ip or None),
+    )
+    _exec(
+        "INSERT INTO cr_tokens (token, user_id) VALUES (%s, %s)",
+        (hash_token(token), user_id),
     )
     touch_ip(user_id, ip)
     row = _one(

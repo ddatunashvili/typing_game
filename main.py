@@ -123,9 +123,16 @@ COOKIE_MAX_AGE = 60 * 60 * 24 * 730  # two years
 
 # Absolute origin used in canonical / Open Graph tags. Social scrapers reject
 # relative image URLs, so this has to be the real public address.
-SITE_URL = os.environ.get("SITE_URL", "https://typing.renode.space").rstrip("/")
+SITE_URL = os.environ.get("SITE_URL", "https://coderace.renode.space").rstrip("/")
 
-_index_cache: Dict[str, object] = {"mtime": 0.0, "html": ""}
+# Re-attach a visitor who has no cookie to the last account seen from their IP.
+# Everyone behind one NAT shares an address, so this cannot tell apart people in
+# the same house or office - they land on the same profile. Set to 0 to make the
+# cookie the only identity.
+IP_AUTOLOGIN = (os.environ.get("IP_AUTOLOGIN", "1").strip().lower()
+                not in ("0", "false", "no", "off"))
+
+_index_cache: Dict[str, object] = {"mtime": None, "html": ""}
 
 
 def new_code() -> str:
@@ -806,9 +813,21 @@ async def api_me(request: Request):
         await run_in_threadpool(db.seen, int(row["id"]), ip)
         return {"accounts": True, "user": db.public_user(row)}
 
-    # No cookie yet: mint a profile with a random handle and identicon. The
-    # cookie is the identity; the IP is only recorded, never used to claim an
-    # existing account (people behind one router would share a profile).
+    # No cookie. Re-attach to the account last seen from this IP if there is
+    # one, so a cleared cookie does not strand someone's rating.
+    if IP_AUTOLOGIN:
+        existing = await run_in_threadpool(db.find_by_ip, ip)
+        if existing is not None:
+            uid = int(existing["id"])
+            token = await run_in_threadpool(db.add_token, uid)
+            await run_in_threadpool(db.seen, uid, ip)
+            response = JSONResponse(
+                {"accounts": True, "user": db.public_user(existing), "adopted": True}
+            )
+            set_token_cookie(response, token, request.url.scheme == "https")
+            return response
+
+    # Nothing to attach to: mint a profile with a random handle and identicon.
     handle = await run_in_threadpool(db.random_free_name)
     token, user = await run_in_threadpool(db.register, handle, ip)
     response = JSONResponse({"accounts": True, "user": user, "created": True})
@@ -843,6 +862,24 @@ async def api_register(request: Request):
         await run_in_threadpool(db.seen, int(existing["id"]), ip)
         row = await run_in_threadpool(db.find_by_token, request.cookies[COOKIE_NAME])
         return {"user": db.public_user(row)}
+
+    if IP_AUTOLOGIN:
+        same_ip = await run_in_threadpool(db.find_by_ip, ip)
+        if same_ip is not None:
+            # one account per IP: rename the existing one instead of adding another
+            uid = int(same_ip["id"])
+            if await run_in_threadpool(db.name_taken, name, uid):
+                ideas = await run_in_threadpool(db.name_suggestions, name, uid, 5)
+                return JSONResponse(
+                    {"error": "name_taken", "name": name, "suggestions": ideas},
+                    status_code=409,
+                )
+            await run_in_threadpool(db.rename, uid, name)
+            token = await run_in_threadpool(db.add_token, uid)
+            row = await run_in_threadpool(db.find_by_token, token)
+            response = JSONResponse({"user": db.public_user(row), "adopted": True})
+            set_token_cookie(response, token, request.url.scheme == "https")
+            return response
 
     token, user = await run_in_threadpool(db.register, name, ip)
     response = JSONResponse({"user": user})
@@ -1255,13 +1292,32 @@ async def healthz():
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
+# Files whose URL gets a build stamp, so a cached copy can never be paired with
+# newer markup. Without this a stale app.js against a new index.html throws on
+# the first element that no longer exists and the page dies.
+VERSIONED = ("app.js", "style.css")
+
+
+def asset_stamp() -> str:
+    newest = 0.0
+    for name in VERSIONED:
+        try:
+            newest = max(newest, (STATIC_DIR / name).stat().st_mtime)
+        except OSError:
+            pass
+    return format(int(newest), "x")
+
+
 def render_index() -> str:
-    """index.html with {{SITE_URL}} filled in, re-read when the file changes."""
+    """index.html with {{SITE_URL}} and asset stamps filled in."""
     path = STATIC_DIR / "index.html"
-    mtime = path.stat().st_mtime
-    if _index_cache["mtime"] != mtime:
-        _index_cache["html"] = path.read_text(encoding="utf-8").replace("{{SITE_URL}}", SITE_URL)
-        _index_cache["mtime"] = mtime
+    stamp = (path.stat().st_mtime, asset_stamp())
+    if _index_cache["mtime"] != stamp:
+        html = path.read_text(encoding="utf-8").replace("{{SITE_URL}}", SITE_URL)
+        for name in VERSIONED:
+            html = html.replace("/static/" + name, "/static/%s?v=%s" % (name, stamp[1]))
+        _index_cache["html"] = html
+        _index_cache["mtime"] = stamp
     return str(_index_cache["html"])
 
 

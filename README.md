@@ -151,6 +151,14 @@ when no database is configured.
 - **No sign-up.** Your first visit mints a profile automatically: a generated handle like
   `QuantumRegex42`, a generated identicon and a rating of 1200. The top bar shows a
   **profile button**, not a register button.
+- **Lost your cookie?** With `IP_AUTOLOGIN=1` (the default) a visitor with no cookie is
+  re-attached to the account last seen from their IP instead of getting a fresh one, so a
+  cleared cookie does not strand a rating. Cookies live in `cr_tokens`, so one account can
+  hold several of them and a second device does not log the first one out.
+
+  The trade-off is real: **everyone behind one router, office NAT, mobile carrier or VPN
+  shares an IP**, so they land on the same profile and can rename it or add to its rating.
+  Set `IP_AUTOLOGIN=0` to make the cookie the only identity.
 - Open it to change your **name** or **avatar**. Names are unique: the dialog checks
   availability as you type and, if the name is taken, offers free variations
   (`Davit1`, `D_a_v_i_t`, `DavitDev`, `theDavit`, `Davit_`, `davit.exe`) as one-click chips.
@@ -345,7 +353,8 @@ production so the panel's injected value wins.
 | `DATABASE_URL` | unset | alternative to the five `MYSQL_*` vars; a `jdbc:` prefix and percent-encoded passwords are accepted |
 | `MYSQL_CONNECT_TIMEOUT` | `8` | seconds before giving up on the database |
 | `LIBRARY_REFRESH_SECONDS` | `60` | how often the snippet library and settings are re-read |
-| `SITE_URL` | `https://typing.renode.space` | absolute origin for canonical and Open Graph tags |
+| `SITE_URL` | `https://coderace.renode.space` | absolute origin for canonical and Open Graph tags |
+| `IP_AUTOLOGIN` | `1` | re-attach a cookie-less visitor to the last account seen from their IP |
 | `COUNTDOWN_SECONDS` / `CHAT_HISTORY` / `RACE_SECONDS` / `PLAYLIST_SIZE` | see above | seed values for `cr_config` on first start |
 
 Leave the database vars unset to run with accounts disabled and the seed snippets in use.
@@ -353,13 +362,24 @@ Tables (`cr_users`, `cr_user_ips`, `cr_races`, `cr_snippets`, `cr_config`) are c
 automatically on first start. If the database is
 unreachable the app logs a warning and serves the game without accounts rather than failing.
 
+### Cache busting
+
+`index.html` is templated, and the `app.js` / `style.css` URLs get a `?v=<stamp>` taken from
+their modification time. A browser or proxy that cached the old JavaScript therefore cannot
+pair it with newer markup - which previously threw
+`Cannot set properties of null (setting 'onclick')` on the first element that had been
+removed, and killed the whole page. The event wiring is also bound through a guarded helper
+now, so a single missing element warns instead of aborting the rest of the script.
+
 ### Reverse proxy
 
 `deploy/nginx.conf` is a working config with placeholders for the domain and the
 container's address. The parts that matter:
 
 - `proxy_http_version 1.1` plus the `Upgrade` / `Connection` headers — without them
-  `/ws/{code}` fails and multiplayer silently never connects.
+  `/ws/{code}` arrives as a plain GET, which a websocket route does not match, so the app
+  answers **404** and multiplayer silently never connects. **Every** hostname the app serves
+  needs this, not just the first one.
 - The `map $http_upgrade $connection_upgrade` block belongs in `http{}`, not `server{}`.
 - `X-Forwarded-Proto $scheme` — the app uses it to mark its cookie `Secure` on HTTPS.
 - `X-Forwarded-For` — the source of the stored client IP.
