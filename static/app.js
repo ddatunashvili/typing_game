@@ -1,4 +1,4 @@
-/* CodeRace client: typing engine + lobby websocket. */
+/* CodeRace client: typing engine, filters, profile and lobby websocket. */
 (() => {
   "use strict";
 
@@ -8,13 +8,28 @@
     home: $("screen-home"),
     room: $("screen-room"),
     name: $("nameInput"),
+    nameField: $("nameField"),
+    register: $("registerBtn"),
+    profileBox: $("profileBox"),
+    profileAvatar: $("profileAvatar"),
+    profileName: $("profileName"),
+    profileEdit: $("profileEdit"),
     leave: $("leaveBtn"),
     langGrid: $("langGrid"),
+    levelChips: $("levelChips"),
+    topicChips: $("topicChips"),
+    levelHint: $("levelHint"),
+    topicHint: $("topicHint"),
+    topicAll: $("topicAll"),
+    topicNone: $("topicNone"),
+    filterWarn: $("filterWarn"),
     solo: $("soloBtn"),
     create: $("createBtn"),
     joinForm: $("joinForm"),
     joinCode: $("joinCode"),
     homeErr: $("homeErr"),
+    lbPanel: $("lbPanel"),
+    leaderboard: $("leaderboard"),
     chatLog: $("chatLog"),
     chatForm: $("chatForm"),
     chatInput: $("chatInput"),
@@ -22,6 +37,12 @@
     codeText: $("codeText"),
     copyLink: $("copyLink"),
     langSelect: $("langSelect"),
+    filterBtn: $("filterBtn"),
+    roomFilters: $("roomFilters"),
+    roomLevelChips: $("roomLevelChips"),
+    roomTopicChips: $("roomTopicChips"),
+    roomFilterNote: $("roomFilterNote"),
+    snipMeta: $("snipMeta"),
     stateBadge: $("stateBadge"),
     ready: $("readyBtn"),
     start: $("startBtn"),
@@ -38,19 +59,43 @@
     trap: $("trap"),
     hint: $("hint"),
     results: $("results"),
+    modal: $("profileModal"),
+    pfTitle: $("pfTitle"),
+    pfName: $("pfName"),
+    pfAvatar: $("pfAvatar"),
+    pfPreview: $("pfPreview"),
+    pfRemove: $("pfRemove"),
+    pfErr: $("pfErr"),
+    pfCancel: $("pfCancel"),
+    pfSave: $("pfSave"),
   };
 
   const LANG_FALLBACK = { markup: "markup", html: "markup" };
 
+  function readList(key) {
+    try {
+      const raw = JSON.parse(localStorage.getItem(key) || "[]");
+      return Array.isArray(raw) ? raw.filter((v) => typeof v === "string") : [];
+    } catch (err) {
+      return [];
+    }
+  }
+
   const S = {
-    langs: [],
+    meta: null,
     lang: localStorage.getItem("cr_lang") || "python",
+    levels: readList("cr_levels"),
+    topics: readList("cr_topics"),
     name: localStorage.getItem("cr_name") || "",
     pid: localStorage.getItem("cr_pid") || "",
+    me: null,
+    accounts: false,
     ws: null,
     room: null,
     solo: false,
     lobby: null,
+    snipLevel: "",
+    snipTopic: "",
   };
 
   // ---------- typing engine ----------
@@ -251,6 +296,7 @@
     el.codeBox.classList.add("locked");
     if (S.solo) {
       showSoloResult(w, a, secs);
+      recordSolo(w, a, secs);
     } else {
       send({ t: "finish", wpm: w, acc: a, time: secs });
       updateSelfBar(1);
@@ -260,6 +306,348 @@
   function focusTrap() {
     el.trap.focus({ preventScroll: true });
     el.codeBox.classList.add("focus");
+  }
+
+  // ---------- filters ----------
+  function catalogFor(lang) {
+    if (!S.meta) return null;
+    return S.meta.catalog.find((c) => c.id === lang) || null;
+  }
+
+  function levelLabel(id) {
+    const row = S.meta && S.meta.levels.find((l) => l.id === id);
+    return row ? row.label : id;
+  }
+
+  function topicLabel(id) {
+    const row = S.meta && S.meta.topics.find((t) => t.id === id);
+    return row ? row.label : id;
+  }
+
+  /** Exact snippet count for a filter combination, from the level x topic table. */
+  function countMatches(lang, levels, topics) {
+    const cat = catalogFor(lang);
+    if (!cat) return 0;
+    const wantL = levels.length ? levels : S.meta.levels.map((l) => l.id);
+    const wantT = topics.length ? topics : S.meta.topics.map((t) => t.id);
+    let n = 0;
+    for (const lv of wantL) {
+      for (const tp of wantT) n += cat.combos[lv + "|" + tp] || 0;
+    }
+    return n;
+  }
+
+  function filterQuery() {
+    const parts = [];
+    if (S.levels.length) parts.push("levels=" + encodeURIComponent(S.levels.join(",")));
+    if (S.topics.length) parts.push("topics=" + encodeURIComponent(S.topics.join(",")));
+    return parts.join("&");
+  }
+
+  function chip(label, count, on, enabled, onClick) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "chip" + (on ? " on" : "") + (enabled ? "" : " off");
+    b.innerHTML = '<span class="chip-label"></span><span class="chip-n"></span>';
+    b.querySelector(".chip-label").textContent = label;
+    b.querySelector(".chip-n").textContent = count;
+    b.disabled = !enabled;
+    if (enabled) b.onclick = onClick;
+    return b;
+  }
+
+  function toggle(list, id) {
+    const i = list.indexOf(id);
+    if (i >= 0) list.splice(i, 1);
+    else list.push(id);
+    return list;
+  }
+
+  function saveFilters() {
+    localStorage.setItem("cr_levels", JSON.stringify(S.levels));
+    localStorage.setItem("cr_topics", JSON.stringify(S.topics));
+  }
+
+  /** Drop topics that the chosen language has nothing for. */
+  function pruneTopics() {
+    const cat = catalogFor(S.lang);
+    if (!cat) return;
+    S.topics = S.topics.filter((t) => cat.topics[t]);
+  }
+
+  function renderFilters() {
+    if (!S.meta) return;
+    const cat = catalogFor(S.lang);
+    if (!cat) return;
+
+    el.levelChips.innerHTML = "";
+    for (const lv of S.meta.levels) {
+      const n = cat.levels[lv.id] || 0;
+      el.levelChips.appendChild(
+        chip(lv.label, n, S.levels.includes(lv.id), n > 0, () => {
+          toggle(S.levels, lv.id);
+          saveFilters();
+          renderFilters();
+        })
+      );
+    }
+
+    el.topicChips.innerHTML = "";
+    for (const tp of S.meta.topics) {
+      const n = cat.topics[tp.id] || 0;
+      if (!n) continue; // this language has nothing on that topic
+      el.topicChips.appendChild(
+        chip(tp.label, n, S.topics.includes(tp.id), true, () => {
+          toggle(S.topics, tp.id);
+          saveFilters();
+          renderFilters();
+        })
+      );
+    }
+
+    const matches = countMatches(S.lang, S.levels, S.topics);
+    el.levelHint.textContent = S.levels.length ? "" : "any";
+    el.topicHint.textContent = S.topics.length ? S.topics.length + " picked" : "any";
+    el.filterWarn.classList.toggle("hidden", matches > 0);
+    el.filterWarn.textContent =
+      "Nothing matches that combination for " +
+      cat.label +
+      " — a random " +
+      cat.label +
+      " snippet will be used instead.";
+  }
+
+  function renderRoomFilters(st) {
+    if (!S.meta) return;
+    const cat = catalogFor(st.language);
+    if (!cat) return;
+    const isHost = st.host === S.pid;
+    const locked = !isHost || st.state === "countdown" || st.state === "racing";
+
+    el.roomLevelChips.innerHTML = "";
+    for (const lv of S.meta.levels) {
+      const n = cat.levels[lv.id] || 0;
+      el.roomLevelChips.appendChild(
+        chip(lv.label, n, st.levels.includes(lv.id), n > 0 && !locked, () => {
+          sendFilters(toggle(st.levels.slice(), lv.id), st.topics);
+        })
+      );
+    }
+
+    el.roomTopicChips.innerHTML = "";
+    for (const tp of S.meta.topics) {
+      const n = cat.topics[tp.id] || 0;
+      if (!n) continue;
+      el.roomTopicChips.appendChild(
+        chip(tp.label, n, st.topics.includes(tp.id), !locked, () => {
+          sendFilters(st.levels, toggle(st.topics.slice(), tp.id));
+        })
+      );
+    }
+
+    el.roomFilterNote.textContent = locked
+      ? isHost
+        ? "filters are locked while a race is running"
+        : "only the host can change the filters"
+      : st.matches + " snippet(s) match — next race picks one of them";
+  }
+
+  function sendFilters(levels, topics) {
+    S.levels = levels.slice();
+    S.topics = topics.slice();
+    saveFilters();
+    send({ t: "filters", levels, topics });
+  }
+
+  function paintSnipMeta(level, topic) {
+    S.snipLevel = level || "";
+    S.snipTopic = topic || "";
+    if (!level && !topic) {
+      el.snipMeta.textContent = "";
+      el.snipMeta.className = "snip-meta";
+      return;
+    }
+    el.snipMeta.textContent = levelLabel(level) + " · " + topicLabel(topic);
+    el.snipMeta.className = "snip-meta lvl-" + level;
+  }
+
+  // ---------- profile ----------
+  function avatarUrl(uid, version) {
+    return "/api/avatar/" + uid + "?v=" + (version || 0);
+  }
+
+  function paintAvatar(node, who) {
+    const uid = who.uid != null ? who.uid : who.id;
+    const version = who.avatar || 0;
+    if (uid && version) {
+      node.style.backgroundImage = 'url("' + avatarUrl(uid, version) + '")';
+      node.textContent = "";
+      node.classList.add("has-img");
+    } else {
+      node.style.backgroundImage = "";
+      node.classList.remove("has-img");
+      node.textContent = ((who.name || "?").trim().charAt(0) || "?").toUpperCase();
+    }
+  }
+
+  function paintProfile() {
+    const known = !!S.me;
+    el.profileBox.classList.toggle("hidden", !known);
+    el.nameField.classList.toggle("hidden", known);
+    el.register.classList.toggle("hidden", known || !S.accounts);
+    if (known) {
+      el.profileName.textContent = S.me.name;
+      paintAvatar(el.profileAvatar, S.me);
+      el.name.value = S.me.name;
+    }
+  }
+
+  async function loadMe() {
+    try {
+      const res = await fetch("/api/me", { credentials: "same-origin" });
+      const data = await res.json();
+      S.accounts = !!data.accounts;
+      S.me = data.user || null;
+    } catch (err) {
+      S.accounts = false;
+      S.me = null;
+    }
+    paintProfile();
+    if (S.accounts) loadLeaderboard();
+  }
+
+  async function loadLeaderboard() {
+    try {
+      const res = await fetch("/api/leaderboard?limit=10");
+      const { rows } = await res.json();
+      if (!rows || !rows.length) {
+        el.lbPanel.classList.add("hidden");
+        return;
+      }
+      el.leaderboard.innerHTML = "";
+      rows.forEach((row, i) => {
+        const line = document.createElement("div");
+        line.className = "lb-row" + (S.me && S.me.id === row.id ? " me" : "");
+        line.innerHTML =
+          '<span class="lb-i"></span><span class="avatar sm"></span>' +
+          '<span class="lb-name"></span><b class="lb-wpm"></b><span class="lb-acc"></span>';
+        line.querySelector(".lb-i").textContent = i + 1;
+        line.querySelector(".lb-name").textContent = row.name;
+        line.querySelector(".lb-wpm").textContent = Math.round(row.best_wpm) + " wpm";
+        line.querySelector(".lb-acc").textContent = Math.round(row.best_acc) + "%";
+        paintAvatar(line.querySelector(".avatar"), row);
+        el.leaderboard.appendChild(line);
+      });
+      el.lbPanel.classList.remove("hidden");
+    } catch (err) {
+      el.lbPanel.classList.add("hidden");
+    }
+  }
+
+  function openProfile() {
+    el.pfErr.textContent = "";
+    el.pfAvatar.value = "";
+    el.pfTitle.textContent = S.me ? "Your profile" : "Create your profile";
+    el.pfName.value = S.me ? S.me.name : (el.name.value || "").trim();
+    el.pfRemove.classList.toggle("hidden", !(S.me && S.me.avatar));
+    paintAvatar(el.pfPreview, S.me || { name: el.pfName.value });
+    el.modal.classList.remove("hidden");
+    el.pfName.focus();
+  }
+
+  function closeProfile() {
+    el.modal.classList.add("hidden");
+  }
+
+  async function saveProfile() {
+    const name = (el.pfName.value || "").trim().slice(0, 18);
+    if (!name) {
+      el.pfErr.textContent = "pick a display name";
+      return;
+    }
+    el.pfSave.disabled = true;
+    el.pfErr.textContent = "";
+    try {
+      const endpoint = S.me ? "/api/profile" : "/api/register";
+      const res = await fetch(endpoint, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        el.pfErr.textContent = data.error || "could not save";
+        return;
+      }
+      S.me = data.user;
+      localStorage.setItem("cr_name", name);
+
+      const file = el.pfAvatar.files && el.pfAvatar.files[0];
+      if (file) {
+        const form = new FormData();
+        form.append("file", file);
+        const up = await fetch("/api/avatar", {
+          method: "POST",
+          credentials: "same-origin",
+          body: form,
+        });
+        const upData = await up.json();
+        if (!up.ok) {
+          el.pfErr.textContent =
+            upData.error === "too_large"
+              ? "image is over 512 KB"
+              : upData.error === "unsupported_type"
+              ? "use a png, jpeg, gif or webp"
+              : upData.error || "image upload failed";
+          paintProfile();
+          return;
+        }
+        S.me.avatar = upData.avatar_version;
+      }
+      paintProfile();
+      loadLeaderboard();
+      closeProfile();
+    } catch (err) {
+      el.pfErr.textContent = "network error";
+    } finally {
+      el.pfSave.disabled = false;
+    }
+  }
+
+  async function removeAvatar() {
+    try {
+      await fetch("/api/avatar", { method: "DELETE", credentials: "same-origin" });
+      if (S.me) S.me.avatar = 0;
+      el.pfRemove.classList.add("hidden");
+      paintAvatar(el.pfPreview, S.me || { name: el.pfName.value });
+      paintProfile();
+      loadLeaderboard();
+    } catch (err) {
+      el.pfErr.textContent = "could not remove the image";
+    }
+  }
+
+  async function recordSolo(w, a, secs) {
+    if (!S.me) return;
+    try {
+      await fetch("/api/race", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          language: S.lang,
+          level: S.snipLevel,
+          topic: S.snipTopic,
+          wpm: w,
+          acc: a,
+          seconds: secs,
+        }),
+      });
+      loadLeaderboard();
+    } catch (err) {
+      /* a lost stat must never break the run */
+    }
   }
 
   // ---------- networking ----------
@@ -280,6 +668,8 @@
       pid: S.pid,
       create: create ? "1" : "0",
       lang: S.lang,
+      levels: S.levels.join(","),
+      topics: S.topics.join(","),
     });
     const ws = new WebSocket(proto + "//" + location.host + "/ws/" + code + "?" + qs);
     S.ws = ws;
@@ -332,6 +722,8 @@
     el.langSelect.disabled = st.host !== S.pid || st.state !== "waiting";
     el.stateBadge.textContent = st.state;
     el.stateBadge.className = "badge " + st.state;
+    paintSnipMeta(st.level, st.topic);
+    renderRoomFilters(st);
 
     const isHost = st.host === S.pid;
     const me = st.players.find((p) => p.id === S.pid);
@@ -360,7 +752,10 @@
     if (st.state === "racing" && !T.running && me && !me.finished) armRace();
 
     renderRacers(st);
-    if (st.state === "finished") renderResults(st);
+    if (st.state === "finished") {
+      renderResults(st);
+      if (S.me) loadLeaderboard();
+    }
   }
 
   function applyProg(m) {
@@ -388,7 +783,7 @@
     row.className = "racer" + (p.id === S.pid ? " me" : "");
     row.dataset.id = p.id;
     row.innerHTML =
-      '<div class="who"><span class="nm"></span><span class="tag"></span></div>' +
+      '<div class="who"><span class="avatar sm"></span><span class="nm"></span><span class="tag"></span></div>' +
       '<div class="bar"><i></i></div>' +
       '<div class="stat"><b class="w">0</b> wpm · <span class="a">100</span>%</div>';
     el.racers.appendChild(row);
@@ -399,6 +794,7 @@
     const row = el.racers.querySelector('.racer[data-id="' + p.id + '"]');
     if (!row) return;
     row.querySelector(".nm").textContent = p.name;
+    paintAvatar(row.querySelector(".avatar"), p);
     const tag = row.querySelector(".tag");
     const host = S.lobby && S.lobby.host === p.id;
     let label = "";
@@ -466,7 +862,9 @@
       div.textContent = m.text;
     } else {
       div.className = "msg" + (m.id === S.pid ? " me" : "");
-      div.innerHTML = '<span class="who"></span><span class="body"></span>';
+      div.innerHTML =
+        '<span class="avatar sm"></span><span class="who"></span><span class="body"></span>';
+      paintAvatar(div.querySelector(".avatar"), m);
       div.querySelector(".who").textContent = m.name + ":";
       div.querySelector(".body").textContent = m.text;
     }
@@ -480,6 +878,7 @@
 
   // ---------- screens ----------
   function currentName() {
+    if (S.me) return S.me.name;
     const v = (el.name.value || "").trim().slice(0, 18);
     return v || "Guest" + Math.floor(Math.random() * 900 + 100);
   }
@@ -492,7 +891,9 @@
     el.room.classList.add("hidden");
     el.leave.classList.add("hidden");
     el.name.disabled = false;
+    el.roomFilters.classList.add("hidden");
     history.replaceState(null, "", "/");
+    renderFilters();
   }
 
   function showRoom() {
@@ -505,6 +906,7 @@
     el.racers.classList.toggle("hidden", S.solo);
     el.ready.classList.toggle("hidden", S.solo);
     el.start.classList.toggle("hidden", S.solo);
+    el.filterBtn.classList.toggle("hidden", S.solo);
     document.querySelector(".room-meta").classList.toggle("hidden", S.solo);
     focusTrap();
   }
@@ -519,11 +921,16 @@
   }
 
   async function loadSoloSnippet() {
-    const res = await fetch("/api/snippet?lang=" + encodeURIComponent(S.lang) + "&avoid=" + encodeURIComponent(T.code));
+    const qs =
+      "lang=" + encodeURIComponent(S.lang) +
+      "&avoid=" + encodeURIComponent(T.code) +
+      (filterQuery() ? "&" + filterQuery() : "");
+    const res = await fetch("/api/snippet?" + qs);
     const data = await res.json();
     el.results.classList.add("hidden");
     el.again.classList.remove("hidden");
     el.again.textContent = "New snippet";
+    paintSnipMeta(data.level, data.topic);
     renderCode(data.snippet, S.lang);
     armRace();
   }
@@ -540,12 +947,14 @@
   }
 
   // ---------- setup ----------
-  async function initLangs() {
-    S.langs = await (await fetch("/api/languages")).json();
+  async function initMeta() {
+    S.meta = await (await fetch("/api/meta")).json();
+    S.accounts = !!S.meta.accounts;
     el.langGrid.innerHTML = "";
     el.langSelect.innerHTML = "";
-    for (const l of S.langs) {
+    for (const l of S.meta.languages) {
       const b = document.createElement("button");
+      b.type = "button";
       b.textContent = l.label;
       b.dataset.id = l.id;
       b.className = l.id === S.lang ? "on" : "";
@@ -558,6 +967,9 @@
       el.langSelect.appendChild(opt);
     }
     el.langSelect.value = S.lang;
+    pruneTopics();
+    saveFilters();
+    renderFilters();
   }
 
   function setLang(id) {
@@ -565,11 +977,15 @@
     localStorage.setItem("cr_lang", id);
     for (const b of el.langGrid.children) b.classList.toggle("on", b.dataset.id === id);
     el.langSelect.value = id;
+    pruneTopics();
+    saveFilters();
+    renderFilters();
   }
 
   async function createLobby() {
     el.homeErr.textContent = "";
-    const res = await fetch("/api/lobby/new?lang=" + encodeURIComponent(S.lang));
+    const qs = "lang=" + encodeURIComponent(S.lang) + (filterQuery() ? "&" + filterQuery() : "");
+    const res = await fetch("/api/lobby/new?" + qs);
     const { code } = await res.json();
     S.solo = false;
     connect(code, true);
@@ -592,6 +1008,45 @@
     if (code.length >= 4) joinLobby(code);
   };
   el.leave.onclick = leave;
+
+  el.register.onclick = openProfile;
+  el.profileEdit.onclick = openProfile;
+  el.pfCancel.onclick = closeProfile;
+  el.pfSave.onclick = saveProfile;
+  el.pfRemove.onclick = removeAvatar;
+  el.pfAvatar.onchange = () => {
+    const file = el.pfAvatar.files && el.pfAvatar.files[0];
+    if (!file) return;
+    if (file.size > 512 * 1024) {
+      el.pfErr.textContent = "image is over 512 KB";
+      el.pfAvatar.value = "";
+      return;
+    }
+    el.pfErr.textContent = "";
+    el.pfPreview.style.backgroundImage = 'url("' + URL.createObjectURL(file) + '")';
+    el.pfPreview.textContent = "";
+    el.pfPreview.classList.add("has-img");
+  };
+  el.modal.onclick = (e) => {
+    if (e.target === el.modal) closeProfile();
+  };
+
+  el.topicAll.onclick = () => {
+    const cat = catalogFor(S.lang);
+    S.topics = cat ? Object.keys(cat.topics) : [];
+    saveFilters();
+    renderFilters();
+  };
+  el.topicNone.onclick = () => {
+    S.topics = [];
+    saveFilters();
+    renderFilters();
+  };
+
+  el.filterBtn.onclick = () => {
+    el.roomFilters.classList.toggle("hidden");
+    if (S.lobby) renderRoomFilters(S.lobby);
+  };
 
   el.chatForm.onsubmit = (e) => {
     e.preventDefault();
@@ -621,15 +1076,17 @@
   el.codeBox.onclick = focusTrap;
   el.trap.addEventListener("blur", () => el.codeBox.classList.remove("focus"));
   document.addEventListener("keydown", (e) => {
+    if (!el.modal.classList.contains("hidden")) return;
     if (document.activeElement === el.chatInput || document.activeElement === el.name ||
         document.activeElement === el.joinCode) return;
     onKeyDown(e);
   });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && document.activeElement === el.chatInput) focusTrap();
+    if (e.key === "Escape" && !el.modal.classList.contains("hidden")) closeProfile();
   });
 
-  initLangs().then(() => {
+  Promise.all([initMeta(), loadMe()]).then(() => {
     const code = new URLSearchParams(location.search).get("l");
     if (code) joinLobby(code);
   });

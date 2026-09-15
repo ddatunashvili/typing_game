@@ -14,11 +14,44 @@ Open http://127.0.0.1:8000
 
 ## Play
 
-- Pick a language (15 available), then **Practice solo** or **Create lobby**.
+- Pick a language (15 available), a **level** and the **topics** you want, then
+  **Practice solo** or **Create lobby**.
 - Share the invite link (the code pill copies it) or the 5-char code — friends paste it into **Join**.
 - Host presses **Start race**; a race also auto-starts when everyone is Ready.
 - 5s countdown, then everyone types the same snippet. Chat lives in the left panel.
 - Live WPM / accuracy / progress bars per player, results table with placements.
+
+## Levels and topics
+
+Every snippet is tagged with one level and one topic, so you can narrow what you get.
+
+- **Levels:** `easy`, `medium`, `hard` — graded by typing load (symbol density, nesting, length).
+  All 15 languages have snippets at all three levels.
+- **Topics:** `algorithms`, `data-structures`, `strings`, `math`, `async`, `web`, `oop`,
+  `functional`, `errors`, `data`, `ui`, `devops`.
+- Picking nothing means *any*. Picking several is a union — `easy` + `hard` gives both.
+- Chips show how many snippets each choice has for the current language, and topics the
+  language has nothing for are hidden (SQL has no `async` snippets, for instance).
+- If a combination matches nothing, the app says so and falls back to a random snippet from
+  that language rather than leaving you with an empty screen.
+- In a lobby the **filters** button opens the same picker; only the host can change it, and
+  it locks while a race is running.
+
+## Profiles
+
+Optional — the game is fully playable without them, and everything below turns itself off
+when no database is configured.
+
+- **Register** in the top bar with a display name, and optionally a profile image
+  (png / jpeg / gif / webp, up to 512 KB).
+- You are **recognised automatically** on your next visit: registering sets a long-lived
+  `HttpOnly` cookie holding a random token, and only the SHA-256 of that token is stored.
+- Avatars are kept in MySQL as BLOBs, not on disk — the panel replaces `/home/container`
+  on every start, so uploaded files would not survive a restart.
+- Recognised players race under their saved name, show their avatar in the racer list and
+  chat, and have finished races recorded for the leaderboard.
+- IP addresses are stored per player (last seen, plus a per-IP hit log). That is personal
+  data — make sure that is what you want before deploying publicly.
 
 ## Typing rules
 
@@ -30,26 +63,60 @@ Open http://127.0.0.1:8000
 
 | file | role |
 | --- | --- |
-| `main.py` | FastAPI app, lobby state machine, `/ws/{code}` websocket |
-| `snippets.py` | snippet library per language |
-| `static/app.js` | typing engine, per-char highlighting, lobby client |
+| `main.py` | FastAPI app, lobby state machine, `/ws/{code}` websocket, REST API |
+| `snippets.py` | snippet library, tagged by language / level / topic |
+| `db.py` | MySQL: players, IP log, avatars, race history (optional) |
+| `static/app.js` | typing engine, per-char highlighting, filters, profile, lobby client |
 | `static/style.css` | dark theme |
 | `static/index.html` | markup + Prism component loading |
+| `deploy/nginx.conf` | reverse proxy with TLS and WebSocket upgrade |
 
 ## API
 
-- `GET /api/languages` — language list
-- `GET /api/snippet?lang=python` — random snippet (solo mode)
-- `GET /api/lobby/new?lang=python` — create lobby, returns code
-- `WS /ws/{code}?name=&pid=&create=0|1&lang=` — lobby socket
+Catalog and snippets:
 
-Client → server: `chat`, `ready`, `start`, `again`, `lang`, `progress`, `finish`
+- `GET /api/meta` — languages, levels, topics and per-language counts (incl. level×topic)
+- `GET /api/languages` — language list
+- `GET /api/snippet?lang=python&levels=easy,hard&topics=math` — random snippet + its tags
+- `GET /api/lobby/new?lang=python&levels=&topics=` — create lobby, returns code
+- `GET /api/lobby/{code}` — lobby snapshot
+- `GET /healthz` — liveness, lobby count, database state
+
+Accounts (all no-ops when no database is configured):
+
+- `GET /api/me` — the recognised player for this cookie, or `null`
+- `POST /api/register` `{name}` — create a player, sets the recognition cookie
+- `POST /api/profile` `{name}` — rename
+- `POST /api/avatar` (multipart `file`) — upload a profile image
+- `DELETE /api/avatar` — remove it
+- `GET /api/avatar/{user_id}` — serve it
+- `GET /api/leaderboard?limit=10` — best WPM
+- `POST /api/race` — record a solo result (lobby races are recorded server-side)
+
+Websocket `WS /ws/{code}?name=&pid=&create=0|1&lang=&levels=&topics=`
+
+Client → server: `chat`, `ready`, `start`, `again`, `lang`, `filters`, `progress`, `finish`
 Server → client: `hello`, `state`, `chat`, `countdown`, `go`, `prog`, `error`
 
 ## Add snippets
 
-Append strings to the matching list in `snippets.py` — leading indentation is preserved,
-trailing whitespace is stripped automatically.
+Append a `snip(level, topic, code)` entry to the matching list in `snippets.py`:
+
+```python
+snip("medium", "algorithms", r'''
+def bubble(items):
+    for i in range(len(items)):
+        for j in range(len(items) - i - 1):
+            if items[j] > items[j + 1]:
+                items[j], items[j + 1] = items[j + 1], items[j]
+    return items
+'''),
+```
+
+Use a raw string (`r'''`) so escapes like `
+` stay literal. Leading indentation is
+preserved, trailing whitespace is stripped, and an unknown level or topic raises at import
+time rather than failing quietly.
 
 ## LAN play
 
@@ -90,3 +157,23 @@ production so the panel's injected value wins.
 | `COUNTDOWN_SECONDS` | `5` | pre-race countdown |
 | `CHAT_HISTORY` | `100` | chat messages kept per lobby |
 | `WS_PING_INTERVAL` / `WS_PING_TIMEOUT` | `20` | websocket keepalive, raise if a proxy drops idle sockets |
+| `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` | unset | accounts, avatars and race history |
+| `DATABASE_URL` | unset | alternative to the five `MYSQL_*` vars; a `jdbc:` prefix and percent-encoded passwords are accepted |
+| `MYSQL_CONNECT_TIMEOUT` | `8` | seconds before giving up on the database |
+
+Leave the database vars unset to run with accounts disabled. Tables (`cr_users`,
+`cr_user_ips`, `cr_races`) are created automatically on first start. If the database is
+unreachable the app logs a warning and serves the game without accounts rather than failing.
+
+### Reverse proxy
+
+`deploy/nginx.conf` is a working config with placeholders for the domain and the
+container's address. The parts that matter:
+
+- `proxy_http_version 1.1` plus the `Upgrade` / `Connection` headers — without them
+  `/ws/{code}` fails and multiplayer silently never connects.
+- The `map $http_upgrade $connection_upgrade` block belongs in `http{}`, not `server{}`.
+- `X-Forwarded-Proto $scheme` — the app uses it to mark its cookie `Secure` on HTTPS.
+- `X-Forwarded-For` — the source of the stored client IP.
+- `proxy_read_timeout 3600s` — lobbies hold a socket open while idle.
+- `client_max_body_size 2m` — headroom over the 512 KB avatar cap.

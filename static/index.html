@@ -13,10 +13,16 @@
 <header class="topbar">
   <div class="brand"><span class="dot"></span>CodeRace</div>
   <div class="top-right">
-    <label class="name-field">
+    <div id="profileBox" class="profile hidden">
+      <span id="profileAvatar" class="avatar"></span>
+      <span id="profileName" class="pname"></span>
+      <button id="profileEdit" class="ghost">edit</button>
+    </div>
+    <label class="name-field" id="nameField">
       <span>name</span>
       <input id="nameInput" maxlength="18" placeholder="Guest" autocomplete="off" />
     </label>
+    <button id="registerBtn" class="primary hidden">Register</button>
     <button id="leaveBtn" class="ghost hidden">leave</button>
   </div>
 </header>
@@ -25,11 +31,28 @@
 <main id="screen-home" class="screen">
   <div class="home-wrap">
     <h1>Type real code. Race your friends.</h1>
-    <p class="sub">Pick a language, get a syntax-highlighted snippet, beat everyone to the last semicolon.</p>
+    <p class="sub">Pick a language, a level and the topics you want, then beat everyone to the last semicolon.</p>
 
     <section class="panel">
       <h2>language</h2>
       <div id="langGrid" class="lang-grid"></div>
+    </section>
+
+    <section class="panel">
+      <h2>level <span id="levelHint" class="muted"></span></h2>
+      <div id="levelChips" class="chips"></div>
+    </section>
+
+    <section class="panel">
+      <h2>
+        topics <span id="topicHint" class="muted"></span>
+        <span class="head-actions">
+          <button id="topicAll" class="link" type="button">all</button>
+          <button id="topicNone" class="link" type="button">none</button>
+        </span>
+      </h2>
+      <div id="topicChips" class="chips"></div>
+      <p id="filterWarn" class="warn hidden"></p>
     </section>
 
     <section class="actions">
@@ -41,6 +64,11 @@
       </form>
     </section>
     <p id="homeErr" class="err"></p>
+
+    <section class="panel hidden" id="lbPanel">
+      <h2>leaderboard <span class="muted">best wpm</span></h2>
+      <div id="leaderboard" class="lb"></div>
+    </section>
   </div>
 </main>
 
@@ -64,13 +92,27 @@
         <span class="label">lobby</span>
         <button id="copyLink" class="code-pill" title="copy invite link"><span id="codeText">-----</span> ⧉</button>
         <select id="langSelect" class="lang-select"></select>
+        <button id="filterBtn" class="ghost" type="button">filters</button>
       </div>
       <div class="room-ctl">
+        <span id="snipMeta" class="snip-meta"></span>
         <span id="stateBadge" class="badge">waiting</span>
         <button id="readyBtn" class="primary">Ready</button>
         <button id="startBtn" class="accent hidden">Start race</button>
         <button id="againBtn" class="ghost hidden">Race again</button>
       </div>
+    </div>
+
+    <div id="roomFilters" class="room-filters hidden">
+      <div class="fl">
+        <span class="fl-label">level</span>
+        <div id="roomLevelChips" class="chips"></div>
+      </div>
+      <div class="fl">
+        <span class="fl-label">topics</span>
+        <div id="roomTopicChips" class="chips"></div>
+      </div>
+      <p id="roomFilterNote" class="muted"></p>
     </div>
 
     <div id="racers" class="racers"></div>
@@ -91,6 +133,36 @@
     <div id="results" class="results hidden"></div>
   </section>
 </main>
+
+<!-- PROFILE -->
+<div id="profileModal" class="modal hidden">
+  <div class="modal-card">
+    <h3 id="pfTitle">Create your profile</h3>
+    <p class="muted">You are recognised automatically the next time you visit this site.</p>
+
+    <label class="field">
+      <span>display name</span>
+      <input id="pfName" maxlength="18" placeholder="Guest" autocomplete="nickname" />
+    </label>
+
+    <label class="field">
+      <span>profile image <em class="muted">png, jpeg, gif or webp — up to 512 KB</em></span>
+      <input id="pfAvatar" type="file" accept="image/png,image/jpeg,image/gif,image/webp" />
+    </label>
+
+    <div class="pf-preview">
+      <span id="pfPreview" class="avatar big"></span>
+      <button id="pfRemove" class="ghost hidden" type="button">remove image</button>
+    </div>
+
+    <p id="pfErr" class="err"></p>
+
+    <div class="modal-ctl">
+      <button id="pfCancel" class="ghost" type="button">cancel</button>
+      <button id="pfSave" class="accent" type="button">save</button>
+    </div>
+  </div>
+</div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-clike.min.js"></script>
