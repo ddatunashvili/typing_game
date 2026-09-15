@@ -475,10 +475,14 @@ now, so a single missing element warns instead of aborting the rest of the scrip
 `deploy/nginx.conf` is a working config with placeholders for the domain and the
 container's address. The parts that matter:
 
-- `proxy_http_version 1.1` plus the `Upgrade` / `Connection` headers — without them
-  `/ws/{code}` arrives as a plain GET, which a websocket route does not match, so the app
-  answers **404** and multiplayer silently never connects. **Every** hostname the app serves
-  needs this, not just the first one.
+- A dedicated `location /ws/` block carrying `proxy_http_version 1.1`, `Upgrade` and
+  `Connection "upgrade"`. Without them `/ws/{code}` arrives as an ordinary GET, which a
+  websocket route does not match, so the app answers **404** and multiplayer silently never
+  connects. **Every** hostname needs this block, not just the first one.
+- There is deliberately **no `map $http_upgrade` block**. `map` is only valid at `http{}`
+  level, so a hosting panel that only edits a vhost file rejects the whole config. Writing
+  `Connection "upgrade"` literally inside `location /ws/` needs no http{} changes, and only
+  that path is affected.
 - The `map $http_upgrade $connection_upgrade` block belongs in `http{}`, not `server{}`.
 - `X-Forwarded-Proto $scheme` — the app uses it to mark its cookie `Secure` on HTTPS.
 - `X-Forwarded-For` — the source of the stored client IP.
