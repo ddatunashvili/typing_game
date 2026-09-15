@@ -13,6 +13,8 @@ import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import unquote, urlparse
 
+import rating
+
 try:
     import pymysql
     from pymysql.cursors import DictCursor
@@ -160,6 +162,9 @@ SCHEMA = (
         races INT UNSIGNED NOT NULL DEFAULT 0,
         best_wpm DECIMAL(6,1) NOT NULL DEFAULT 0,
         best_acc DECIMAL(5,1) NOT NULL DEFAULT 0,
+        rating INT NOT NULL DEFAULT 1200,
+        wins INT UNSIGNED NOT NULL DEFAULT 0,
+        stars INT UNSIGNED NOT NULL DEFAULT 0,
         last_ip VARCHAR(45) NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -188,6 +193,7 @@ SCHEMA = (
         level VARCHAR(10) NOT NULL,
         topic VARCHAR(24) NOT NULL,
         code MEDIUMTEXT NOT NULL,
+        output MEDIUMTEXT NULL,
         code_hash CHAR(64) NOT NULL,
         active TINYINT(1) NOT NULL DEFAULT 1,
         source VARCHAR(16) NOT NULL DEFAULT 'seed',
@@ -217,6 +223,8 @@ SCHEMA = (
         acc DECIMAL(5,1) NOT NULL,
         seconds DECIMAL(7,2) NOT NULL,
         place SMALLINT UNSIGNED NULL,
+        stars TINYINT UNSIGNED NOT NULL DEFAULT 0,
+        rating_delta SMALLINT NOT NULL DEFAULT 0,
         lobby VARCHAR(8) NULL,
         ip VARCHAR(45) NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -228,6 +236,38 @@ SCHEMA = (
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
 )
+
+
+# Columns added after the first release; MySQL has no "ADD COLUMN IF NOT EXISTS".
+MIGRATIONS = (
+    ("cr_snippets", "output", "ALTER TABLE cr_snippets ADD COLUMN output MEDIUMTEXT NULL"),
+    ("cr_users", "rating", "ALTER TABLE cr_users ADD COLUMN rating INT NOT NULL DEFAULT 1200"),
+    ("cr_users", "wins", "ALTER TABLE cr_users ADD COLUMN wins INT UNSIGNED NOT NULL DEFAULT 0"),
+    ("cr_users", "stars", "ALTER TABLE cr_users ADD COLUMN stars INT UNSIGNED NOT NULL DEFAULT 0"),
+    ("cr_races", "stars", "ALTER TABLE cr_races ADD COLUMN stars TINYINT UNSIGNED NOT NULL DEFAULT 0"),
+    ("cr_races", "rating_delta", "ALTER TABLE cr_races ADD COLUMN rating_delta SMALLINT NOT NULL DEFAULT 0"),
+)
+
+
+def _column_exists(table: str, column: str) -> bool:
+    row = _one(
+        """
+        SELECT COUNT(*) AS n FROM information_schema.columns
+        WHERE table_schema = DATABASE() AND table_name = %s AND column_name = %s
+        """,
+        (table, column),
+    )
+    return bool((row or {}).get("n"))
+
+
+def migrate() -> None:
+    for table, column, statement in MIGRATIONS:
+        try:
+            if not _column_exists(table, column):
+                _exec(statement)
+                log.info("added %s.%s", table, column)
+        except Exception as exc:
+            log.warning("migration for %s.%s failed: %s", table, column, exc)
 
 
 def setup() -> bool:
@@ -246,6 +286,9 @@ def setup() -> bool:
         try:
             for statement in SCHEMA:
                 _exec(statement)
+            _ready = True  # migrate() needs queries to work
+            migrate()
+            _ready = False
         except Exception as exc:
             log.warning("database unavailable - accounts disabled (%s)", exc)
             _config = None
@@ -288,6 +331,7 @@ def clean_name(name: str) -> str:
 
 # ---------- profile ----------
 def public_user(row: dict) -> dict:
+    score = int(row.get("rating") or rating.START_RATING)
     return {
         "id": int(row["id"]),
         "name": row["name"],
@@ -296,6 +340,10 @@ def public_user(row: dict) -> dict:
         "races": int(row.get("races") or 0),
         "best_wpm": float(row.get("best_wpm") or 0),
         "best_acc": float(row.get("best_acc") or 0),
+        "rating": score,
+        "rank": rating.rank_for(score),
+        "wins": int(row.get("wins") or 0),
+        "stars": int(row.get("stars") or 0),
     }
 
 
@@ -304,7 +352,8 @@ def find_by_token(token: str) -> Optional[dict]:
         return None
     return _one(
         """
-        SELECT id, name, avatar_mime, avatar_version, races, best_wpm, best_acc
+        SELECT id, name, avatar_mime, avatar_version, races, best_wpm, best_acc,
+               rating, wins, stars
         FROM cr_users WHERE token = %s
         """,
         (hash_token(token),),
@@ -321,7 +370,8 @@ def register(name: str, ip: str) -> Tuple[str, dict]:
     touch_ip(user_id, ip)
     row = _one(
         """
-        SELECT id, name, avatar_mime, avatar_version, races, best_wpm, best_acc
+        SELECT id, name, avatar_mime, avatar_version, races, best_wpm, best_acc,
+               rating, wins, stars
         FROM cr_users WHERE id = %s
         """,
         (user_id,),
@@ -409,12 +459,15 @@ def record_race(
     place: Optional[int] = None,
     lobby: Optional[str] = None,
     ip: str = "",
+    stars: int = 0,
+    rating_delta: int = 0,
 ) -> None:
     _exec(
         """
         INSERT INTO cr_races
-            (user_id, language, level, topic, wpm, acc, seconds, place, lobby, ip)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (user_id, language, level, topic, wpm, acc, seconds, place, stars,
+             rating_delta, lobby, ip)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
         (
             user_id,
@@ -425,6 +478,8 @@ def record_race(
             round(float(acc), 1),
             round(float(seconds), 2),
             place,
+            max(0, min(3, int(stars))),
+            int(rating_delta),
             (lobby or None) and lobby[:8],
             (ip or None) and ip[:45],
         ),
@@ -434,20 +489,37 @@ def record_race(
         UPDATE cr_users
         SET races = races + 1,
             best_wpm = GREATEST(best_wpm, %s),
-            best_acc = GREATEST(best_acc, %s)
+            best_acc = GREATEST(best_acc, %s),
+            rating = GREATEST(%s, rating + %s),
+            wins = wins + %s,
+            stars = stars + %s
         WHERE id = %s
         """,
-        (round(float(wpm), 1), round(float(acc), 1), user_id),
+        (
+            round(float(wpm), 1),
+            round(float(acc), 1),
+            rating.MIN_RATING,
+            int(rating_delta),
+            1 if place == 1 else 0,
+            max(0, min(3, int(stars))),
+            user_id,
+        ),
     )
+
+
+def get_rating(user_id: int) -> int:
+    row = _one("SELECT rating FROM cr_users WHERE id = %s", (user_id,))
+    return int((row or {}).get("rating") or rating.START_RATING)
 
 
 def leaderboard(limit: int = 10) -> List[dict]:
     rows = _query(
         """
-        SELECT id, name, avatar_mime, avatar_version, races, best_wpm, best_acc
+        SELECT id, name, avatar_mime, avatar_version, races, best_wpm, best_acc,
+               rating, wins, stars
         FROM cr_users
         WHERE races > 0
-        ORDER BY best_wpm DESC, best_acc DESC
+        ORDER BY rating DESC, best_wpm DESC
         LIMIT %s
         """,
         (max(1, min(50, limit)),),
@@ -475,6 +547,7 @@ def seed_snippets(by_language: Dict[str, List[dict]]) -> int:
                     item["level"][:10],
                     item["topic"][:24],
                     item["code"],
+                    item.get("output") or None,
                     code_hash(language, item["code"]),
                 )
             )
@@ -484,9 +557,11 @@ def seed_snippets(by_language: Dict[str, List[dict]]) -> int:
         with conn.cursor() as cur:
             cur.executemany(
                 """
-                INSERT IGNORE INTO cr_snippets
-                    (language, level, topic, code, code_hash, source)
-                VALUES (%s, %s, %s, %s, %s, 'seed')
+                INSERT INTO cr_snippets
+                    (language, level, topic, code, output, code_hash, source)
+                VALUES (%s, %s, %s, %s, %s, %s, 'seed')
+                ON DUPLICATE KEY UPDATE
+                    output = COALESCE(VALUES(output), output)
                 """,
                 rows,
             )
@@ -498,7 +573,7 @@ def load_snippets() -> Dict[str, List[dict]]:
     out: Dict[str, List[dict]] = {}
     for row in _query(
         """
-        SELECT id, language, level, topic, code
+        SELECT id, language, level, topic, code, output
         FROM cr_snippets
         WHERE active = 1
         ORDER BY language, level, id
@@ -510,6 +585,7 @@ def load_snippets() -> Dict[str, List[dict]]:
                 "level": row["level"],
                 "topic": row["topic"],
                 "code": row["code"],
+                "output": row.get("output") or "",
             }
         )
     return out

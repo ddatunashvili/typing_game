@@ -51,12 +51,17 @@ def normalize(code: str) -> str:
     return "\n".join(lines).strip("\n")
 
 
-def snip(level: str, topic: str, code: str) -> dict:
+def snip(level: str, topic: str, code: str, output: str = "") -> dict:
     if level not in LEVEL_IDS:
         raise ValueError("unknown level: " + level)
     if topic not in TOPIC_IDS:
         raise ValueError("unknown topic: " + topic)
-    return {"level": level, "topic": topic, "code": normalize(code)}
+    return {
+        "level": level,
+        "topic": topic,
+        "code": normalize(code),
+        "output": normalize(output) if output else "",
+    }
 
 
 SNIPPETS: Dict[str, List[dict]] = {
@@ -1492,6 +1497,12 @@ echo "deploying ${tag} to ${env}"
 '''),
     ],
 }
+
+
+# Demo transcripts for the simulated run panel (see outputs.py).
+import outputs as _outputs
+
+DEMO_COUNT = _outputs.attach(SNIPPETS)
 
 
 def languages() -> List[dict]:

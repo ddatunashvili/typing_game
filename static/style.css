@@ -68,7 +68,7 @@ button.primary { background: #1e2c42; border-color: #2f4767; color: #cfe4ff; }
 button.primary:hover { background: #25374f; }
 button.accent { background: #1c3b2b; border-color: #2d6446; color: var(--accent); }
 button.accent:hover { background: #224833; }
-button.ghost { background: transparent; }
+button.peer { background: transparent; }
 button.big { padding: 11px 20px; font-size: 15px; }
 button:disabled { opacity: .45; cursor: default; }
 
@@ -613,3 +613,186 @@ input:focus, select:focus { border-color: #3d6ea8; }
 
 .pf-preview { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
 .modal-ctl { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+
+/* ---------- stars ---------- */
+.stars { display: inline-flex; align-items: center; gap: 2px; }
+.star { color: var(--dim); font-size: 15px; line-height: 1; }
+.star.on { color: #ffc46b; text-shadow: 0 0 10px rgba(255, 196, 107, .45); }
+.star-note { color: var(--muted); font-size: 12px; font-style: normal; margin-left: 10px; }
+
+/* ---------- simulated run panel ---------- */
+.run {
+  margin-top: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #0b0d12;
+  overflow: hidden;
+}
+.run-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  background: #101219;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1.3px;
+  color: var(--muted);
+}
+.run-head .stars { margin-left: auto; text-transform: none; letter-spacing: 0; }
+.run-dots { display: inline-flex; gap: 5px; }
+.run-dots i { width: 9px; height: 9px; border-radius: 50%; background: #2a3040; }
+.run-dots i:first-child { background: #ff5f6d; }
+.run-dots i:nth-child(2) { background: #ffc46b; }
+.run-dots i:last-child { background: var(--accent); }
+.run-out {
+  margin: 0;
+  padding: 14px 16px;
+  min-height: 62px;
+  max-height: 210px;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: #cfe7d8;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.run-note { margin: 0; padding: 0 16px 12px; font-size: 11px; }
+
+/* ---------- opponent carets ---------- */
+/* NOTE: named .peer, not .ghost - button.ghost already exists. */
+.ghosts { position: absolute; inset: 18px 20px; pointer-events: none; }
+.peer {
+  position: absolute;
+  width: 2px;
+  background: var(--c, var(--accent-2));
+  box-shadow: 0 0 8px var(--c, var(--accent-2));
+  border-radius: 2px;
+  transition: left .12s linear, top .12s linear;
+}
+/* No name label on the caret: it covered the very text being typed.
+   The colour matches the dot on that racer's row, and the name is a tooltip. */
+.peer.ahead { width: 3px; animation: rush .7s ease-in-out infinite; }
+@keyframes rush { 50% { opacity: .45; } }
+
+/* ---------- ratings ---------- */
+.dotc {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 50%;
+  background: var(--dim);
+  box-shadow: 0 0 6px currentColor;
+}
+
+.rate {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent-2);
+  border: 1px solid #2f4767;
+  background: #101f33;
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+.rate.sm { font-size: 10px; padding: 0 4px; }
+.avatar.is-bot { border-color: #6b5326; }
+.racer.is-bot .nm { color: #ffc46b; }
+.results tr.bot td { color: var(--muted); }
+.results .botflag {
+  font-style: normal;
+  font-size: 10px;
+  color: #ffc46b;
+  border: 1px solid #6b5326;
+  border-radius: 4px;
+  padding: 0 4px;
+}
+.results td .up { color: var(--accent); }
+.results td .down { color: var(--bad); }
+.results td .flat { color: var(--dim); }
+
+/* ---------- bot cards ---------- */
+.bot-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px;
+}
+.bot-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+  padding: 10px 12px;
+  background: var(--panel-2);
+}
+.bot-card:disabled { opacity: .4; }
+.bot-mid { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
+.bot-name { font-weight: 600; font-size: 14px; }
+.bot-blurb { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bot-right { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+.bot-rate { font-family: var(--mono); color: var(--accent-2); font-size: 14px; }
+.bot-rank { font-size: 10px; white-space: nowrap; }
+.modal-card.wide { max-width: 700px; max-height: 84vh; overflow-y: auto; }
+
+/* ---------- rankings ---------- */
+.ranks-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.live {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--accent);
+  border: 1px solid #2d6446;
+  border-radius: 999px;
+  padding: 2px 9px;
+  margin-left: 6px;
+}
+.live::before {
+  content: "";
+  display: inline-block;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-right: 5px;
+  animation: rush 1.6s ease-in-out infinite;
+}
+.ranks { display: flex; flex-direction: column; gap: 6px; }
+.rank-row {
+  display: grid;
+  grid-template-columns: 34px 26px minmax(0, 1fr) auto 62px auto;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel-2);
+  font-size: 14px;
+}
+.rank-row.me { border-color: #2d6446; background: #16241c; }
+.rank-row.bot .rk-name { color: #ffc46b; }
+.rank-row.outside { margin-top: 10px; border-style: dashed; }
+.rk-i { font-family: var(--mono); font-size: 12px; color: var(--muted); text-align: right; }
+.rk-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rk-title { font-size: 11px; white-space: nowrap; }
+.rk-rate { font-family: var(--mono); color: var(--accent-2); text-align: right; }
+.rk-sub { font-size: 11px; white-space: nowrap; }
+
+.ladder { display: flex; flex-wrap: wrap; gap: 8px; }
+.tier {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 5px 11px;
+  background: var(--panel-2);
+  font-size: 12px;
+}
+.tier b { font-weight: 600; }
+.tier span { font-family: var(--mono); font-size: 10px; color: var(--muted); }
+
+@media (max-width: 620px) {
+  .rank-row { grid-template-columns: 26px 20px minmax(0, 1fr) auto; gap: 8px; font-size: 13px; }
+  .rank-row .rk-title, .rank-row .rk-sub { display: none; }
+  .bot-list { grid-template-columns: 1fr; }
+}

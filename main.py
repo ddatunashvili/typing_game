@@ -21,12 +21,19 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
+import bots
 import db
 import library
+import rating
 from library import (
     catalog,
     count_matching,
@@ -114,6 +121,12 @@ def clean_duration(value) -> int:
 COOKIE_NAME = "cr_token"
 COOKIE_MAX_AGE = 60 * 60 * 24 * 730  # two years
 
+# Absolute origin used in canonical / Open Graph tags. Social scrapers reject
+# relative image URLs, so this has to be the real public address.
+SITE_URL = os.environ.get("SITE_URL", "https://typing.renode.space").rstrip("/")
+
+_index_cache: Dict[str, object] = {"mtime": 0.0, "html": ""}
+
 
 def new_code() -> str:
     while True:
@@ -156,10 +169,15 @@ async def current_user(request: Request) -> Optional[dict]:
 
 
 class Player:
-    def __init__(self, pid: str, name: str, ws: WebSocket):
+    def __init__(self, pid: str, name: str, ws: Optional[WebSocket]):
         self.id = pid
         self.name = name
-        self.ws = ws
+        self.ws = ws  # None for a bot: nothing to send to
+        self.bot: Optional[dict] = None
+        self.rating = rating.START_RATING
+        self.stars = 0
+        self.delta = 0
+        self.pos = 0  # caret position in the current snippet
         self.uid: Optional[int] = None
         self.avatar = 0  # avatar version; 0 means no image
         self.ip = ""
@@ -175,7 +193,10 @@ class Player:
         self.time: Optional[float] = None
 
     def reset(self) -> None:
-        self.ready = False
+        self.ready = bool(self.bot)  # bots are always up for a race
+        self.pos = 0
+        self.stars = 0
+        self.delta = 0
         self.idx = 0
         self.chars = 0
         self.snips = 0
@@ -192,7 +213,14 @@ class Player:
             "uid": self.uid,
             "avatar": self.avatar,
             "name": self.name,
+            "bot": bool(self.bot),
+            "slug": (self.bot or {}).get("slug"),
+            "rating": int(self.rating),
+            "rank": rating.rank_for(self.rating),
+            "stars": self.stars,
+            "delta": self.delta,
             "ready": self.ready,
+            "pos": self.pos,
             "idx": self.idx,
             "chars": self.chars,
             "snips": self.snips,
@@ -227,6 +255,7 @@ class Lobby:
         self.snip: dict = {}
         self.playlist: List[dict] = []
         self.bag = library.Bag()
+        self.bot_tasks: List[asyncio.Task] = []
         # once a race has a level, later snippets stick to it until the
         # filters change, so difficulty does not jump around mid-session
         self.level_lock: Optional[str] = None
@@ -239,6 +268,38 @@ class Lobby:
         self.task: Optional[asyncio.Task] = None
         self.chat: List[dict] = []
         self.finish_count = 0
+
+    def add_bot(self, slug: str) -> Optional[Player]:
+        """Seat a bot. Returns None for an unknown slug or a duplicate."""
+        bot = bots.get(slug)
+        if bot is None:
+            return None
+        if any(p.bot and p.bot["slug"] == bot["slug"] for p in self.players.values()):
+            return None
+        pid = "bot-" + bot["slug"]
+        player = Player(pid, bot["name"], None)
+        player.bot = bot
+        player.rating = int(bot["rating"])
+        player.ready = True
+        player.acc = float(bot["acc"])
+        if self.state in ("racing", "countdown"):
+            player.finished = True  # it can join the next one
+        self.players[pid] = player
+        if pid not in self.order:
+            self.order.append(pid)
+        return player
+
+    def remove_bot(self, slug: str) -> bool:
+        pid = "bot-" + (slug or "")
+        if pid not in self.players:
+            return False
+        self.players.pop(pid, None)
+        if pid in self.order:
+            self.order.remove(pid)
+        return True
+
+    def humans(self) -> List[Player]:
+        return [p for p in self.roster() if not p.bot]
 
     def roster(self) -> List[Player]:
         return [self.players[pid] for pid in self.order if pid in self.players]
@@ -270,11 +331,17 @@ class Lobby:
             "snippet": self.snip["code"],
             "level": self.snip["level"],
             "topic": self.snip["topic"],
+            "output": self.snip.get("output") or "",
             "matches": count_matching(self.language, self.levels, self.topics),
             "duration": self.duration,
             "ends_at": self.ends_at,
             "playlist": [
-                {"code": s["code"], "level": s["level"], "topic": s["topic"]}
+                {
+                    "code": s["code"],
+                    "level": s["level"],
+                    "topic": s["topic"],
+                    "output": s.get("output") or "",
+                }
                 for s in self.playlist
             ],
             "start_ts": self.start_ts,
@@ -285,7 +352,7 @@ class Lobby:
         payload = json.dumps(message)
         dead = []
         for pid, player in list(self.players.items()):
-            if pid == skip:
+            if pid == skip or player.ws is None:
                 continue
             try:
                 await player.ws.send_text(payload)
@@ -311,6 +378,10 @@ class Lobby:
             self.timer.cancel()
         self.timer = None
         self.ends_at = 0.0
+        for task in self.bot_tasks:
+            if not task.done():
+                task.cancel()
+        self.bot_tasks = []
 
     async def start_race(self) -> None:
         if self.state in ("countdown", "racing"):
@@ -334,12 +405,87 @@ class Lobby:
             if self.duration > 0:
                 self.ends_at = self.start_ts + self.duration
                 self.timer = asyncio.create_task(self._clock())
+            for player in self.roster():
+                if player.bot and not player.finished:
+                    self.bot_tasks.append(
+                        asyncio.create_task(self._drive_bot(player))
+                    )
             await self.broadcast(
                 {"t": "go", "start_ts": self.start_ts, "ends_at": self.ends_at}
             )
             await self.push_state()
         except asyncio.CancelledError:
             pass
+
+    async def _drive_bot(self, player: Player) -> None:
+        """Type on the bot's behalf: roughly its target wpm, with hesitations."""
+        bot = player.bot or {}
+        chars_per_sec = max(1.0, float(bot.get("wpm", 40)) * 5.0 / 60.0)
+        stumble = float(bot.get("stumble", 0.05))
+        player.acc = float(bot.get("acc", 96.0))
+        tick = 0.25
+        pos = 0.0
+        try:
+            while self.state == "racing" and not player.finished:
+                await asyncio.sleep(tick)
+                if self.state != "racing":
+                    return
+                if random.random() < stumble:
+                    await asyncio.sleep(random.uniform(0.15, 0.6))
+                pos += chars_per_sec * tick * random.uniform(0.82, 1.18)
+
+                current = self.playlist[min(player.idx, len(self.playlist) - 1)]
+                length = max(1, len(current["code"]))
+
+                if pos >= length:
+                    player.chars += length
+                    player.snips += 1
+                    pos = 0.0
+                    if self.duration > 0 and player.idx + 1 < len(self.playlist):
+                        player.idx += 1
+                    else:
+                        await self._bot_finish(player)
+                        return
+
+                elapsed = max(0.5, time.time() - self.start_ts)
+                player.pos = int(pos)
+                player.progress = min(1.0, pos / length)
+                player.wpm = ((player.chars + pos) / 5.0) / (elapsed / 60.0)
+                await self.broadcast(
+                    {
+                        "t": "prog",
+                        "id": player.id,
+                        "p": round(player.progress, 4),
+                        "wpm": round(player.wpm, 1),
+                        "acc": round(player.acc, 1),
+                        "pos": player.pos,
+                        "idx": player.idx,
+                        "chars": player.chars,
+                        "snips": player.snips,
+                    }
+                )
+        except asyncio.CancelledError:
+            pass
+
+    async def _bot_finish(self, player: Player) -> None:
+        player.finished = True
+        player.progress = 1.0
+        player.pos = 0
+        player.time = max(0.1, time.time() - self.start_ts)
+        elapsed = max(0.5, player.time)
+        player.wpm = (player.chars / 5.0) / (elapsed / 60.0)
+        if self.duration > 0:
+            await self.system("%s cleared the playlist" % player.name)
+            await self.push_state()
+            await self.maybe_finish()
+            return
+        self.finish_count += 1
+        player.place = self.finish_count
+        await self.system(
+            "%s finished #%d at %.0f wpm" % (player.name, player.place, player.wpm)
+        )
+        await self.push_state()
+        await self.maybe_finish()
 
     async def _clock(self) -> None:
         """Timed mode: the server ends the race, so every racer stops together."""
@@ -364,25 +510,8 @@ class Lobby:
         self.state = "finished"
         self.ends_at = 0.0
         await self.broadcast({"t": "time_up"})
+        await self.score_race()
         await self.push_state()
-        for player in ranked:
-            if player.uid and db.enabled():
-                try:
-                    await run_in_threadpool(
-                        db.record_race,
-                        player.uid,
-                        self.language,
-                        "mixed" if len(self.playlist) > 1 else self.snip["level"],
-                        "mixed" if len(self.playlist) > 1 else self.snip["topic"],
-                        player.wpm,
-                        player.acc,
-                        float(self.duration),
-                        player.place,
-                        self.code,
-                        player.ip,
-                    )
-                except Exception as exc:
-                    log.warning("could not record timed race: %s", exc)
 
     async def reset_to_lobby(self) -> None:
         self.cancel_task()
@@ -392,6 +521,67 @@ class Lobby:
         for player in self.players.values():
             player.reset()
         await self.push_state()
+
+    async def score_race(self) -> None:
+        """Award stars, run the Elo update and persist it. Idempotent per race."""
+        racers = self.roster()
+        if not racers:
+            return
+
+        length = max(1, len(self.snip.get("code", "")))
+        if self.duration > 0:
+            length = max(1, sum(len(s["code"]) for s in self.playlist[: max(1, 1)]))
+
+        for player in racers:
+            if player.bot:
+                player.stars = rating.stars(player.acc, 0, length, True)
+                continue
+            errors = max(0, int(round(length * (100.0 - player.acc) / 100.0)))
+            player.stars = rating.stars(
+                player.acc, errors, length, bool(player.finished)
+            )
+
+        # Elo: guests and bots are opposition but keep no rating of their own
+        entries = [
+            {
+                "key": p.id,
+                "rating": float(p.rating),
+                "place": p.place,
+                "provisional": bool(p.bot) or not p.uid,
+            }
+            for p in racers
+        ]
+        deltas = rating.race_deltas(entries) if len(entries) > 1 else {}
+        for player in racers:
+            player.delta = int(deltas.get(player.id, 0))
+            if player.delta:
+                player.rating = rating.apply_delta(player.rating, player.delta)
+
+        if not db.enabled():
+            return
+        level = "mixed" if len(self.playlist) > 1 else self.snip.get("level", "")
+        topic = "mixed" if len(self.playlist) > 1 else self.snip.get("topic", "")
+        for player in racers:
+            if player.bot or not player.uid:
+                continue
+            try:
+                await run_in_threadpool(
+                    db.record_race,
+                    player.uid,
+                    self.language,
+                    level,
+                    topic,
+                    player.wpm,
+                    player.acc,
+                    float(player.time or 0.0),
+                    player.place,
+                    self.code,
+                    player.ip,
+                    player.stars,
+                    player.delta,
+                )
+            except Exception as exc:
+                log.warning("could not record race for %s: %s", player.name, exc)
 
     async def maybe_finish(self) -> None:
         racers = self.roster()
@@ -405,6 +595,7 @@ class Lobby:
             await self.finish_timed()
             return
         self.state = "finished"
+        await self.score_race()
         await self.push_state()
 
 
@@ -449,6 +640,7 @@ async def api_snippet(
         "snippet": chosen["code"],
         "level": chosen["level"],
         "topic": chosen["topic"],
+        "output": chosen.get("output") or "",
         "matches": count_matching(lang, wanted_levels, wanted_topics, pinned),
     }
 
@@ -460,19 +652,65 @@ async def api_playlist(
     levels: str = "",
     topics: str = "",
     level: str = "",
+    unique: int = 0,
 ):
     """An ordered run of snippets, for a timed solo session."""
     wanted_levels = parse_ids(levels, LEVEL_IDS)
     wanted_topics = parse_ids(topics, TOPIC_IDS)
-    if level in LEVEL_IDS:
-        wanted_levels = [level]
-    run = library.playlist(lang, size, wanted_levels, wanted_topics)
+    pinned = level if level in LEVEL_IDS else None
+    run = library.playlist(
+        lang, size, wanted_levels, wanted_topics, pinned, unique=bool(unique)
+    )
     return {
         "language": lang,
-        "matches": count_matching(lang, wanted_levels, wanted_topics),
+        "matches": count_matching(lang, wanted_levels, wanted_topics, pinned),
         "playlist": [
-            {"code": s["code"], "level": s["level"], "topic": s["topic"]} for s in run
+            {
+                "code": s["code"],
+                "level": s["level"],
+                "topic": s["topic"],
+                "output": s.get("output") or "",
+            }
+            for s in run
         ],
+    }
+
+
+@app.get("/api/bots")
+async def api_bots():
+    """The bot roster, for the challenge list."""
+    return {"bots": bots.roster(), "ranks": rating.ranks()}
+
+
+@app.get("/api/bot-avatar/{slug}.svg")
+async def api_bot_avatar(slug: str):
+    """Deterministic identicon, so every bot has a stable face."""
+    bot = bots.get(slug)
+    seed = bot["slug"] if bot else (slug or "unknown")
+    return Response(
+        content=bots.avatar_svg(seed),
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=604800"},
+    )
+
+
+@app.get("/api/rankings")
+async def api_rankings(limit: int = 50, request: Request = None):
+    """The rankings board: real players, plus where the viewer sits."""
+    rows: List[dict] = []
+    if db.enabled():
+        rows = await run_in_threadpool(db.leaderboard, limit)
+    me = None
+    if request is not None:
+        user = await current_user(request)
+        if user is not None:
+            me = db.public_user(user)
+    return {
+        "rows": rows,
+        "me": me,
+        "bots": bots.roster(),
+        "ranks": rating.ranks(),
+        "accounts": db.enabled(),
     }
 
 
@@ -494,16 +732,19 @@ async def api_new_lobby(
     levels: str = "",
     topics: str = "",
     duration: int = -1,
+    bot: str = "",
 ):
     code = new_code()
-    lobbies[code] = Lobby(
+    lobby = Lobby(
         code,
         lang,
         parse_ids(levels, LEVEL_IDS),
         parse_ids(topics, TOPIC_IDS),
         None if duration < 0 else duration,
     )
-    return {"code": code}
+    lobbies[code] = lobby
+    seated = lobby.add_bot(bot) if bot else None
+    return {"code": code, "bot": seated.name if seated else None}
 
 
 @app.get("/api/lobby/{code}")
@@ -640,6 +881,10 @@ async def api_race(request: Request):
     except (TypeError, ValueError):
         return JSONResponse({"error": "bad_values"}, status_code=400)
 
+    length = max(1, int(float(body.get("length", 0) or 0)))
+    errors = max(0, int(float(body.get("errors", 0) or 0)))
+    earned = rating.stars(acc, errors, length, bool(body.get("completed", True)))
+
     await run_in_threadpool(
         db.record_race,
         int(user["id"]),
@@ -652,8 +897,10 @@ async def api_race(request: Request):
         None,
         None,
         client_ip(request),
+        earned,
+        0,  # solo has no opponent, so the rating does not move
     )
-    return {"ok": True}
+    return {"ok": True, "stars": earned, "note": rating.star_note(earned)}
 
 
 # ---------- websocket ----------
@@ -712,6 +959,7 @@ async def ws_lobby(
     if account is not None:
         player.uid = int(account["id"])
         player.avatar = int(account.get("avatar_version") or 0) if account.get("avatar_mime") else 0
+        player.rating = int(account.get("rating") or rating.START_RATING)
     if lobby.state in ("racing", "countdown"):
         player.finished = True  # late joiner spectates this round
     lobby.players[pid] = player
@@ -803,6 +1051,22 @@ async def ws_lobby(
                     % ("%ds" % lobby.duration if lobby.duration else "one snippet")
                 )
 
+            elif kind == "bot":
+                if pid != lobby.host or lobby.state in ("countdown", "racing"):
+                    continue
+                seated = lobby.add_bot(str(msg.get("v", "")))
+                if seated is not None:
+                    await lobby.system(
+                        "%s (%d) joined" % (seated.name, seated.rating)
+                    )
+                    await lobby.push_state()
+
+            elif kind == "unbot":
+                if pid != lobby.host or lobby.state in ("countdown", "racing"):
+                    continue
+                if lobby.remove_bot(str(msg.get("v", ""))):
+                    await lobby.push_state()
+
             elif kind == "start":
                 if pid == lobby.host:
                     await lobby.start_race()
@@ -825,6 +1089,7 @@ async def ws_lobby(
                 player.progress = max(0.0, min(1.0, float(msg.get("p", 0))))
                 player.wpm = max(0.0, float(msg.get("wpm", 0)))
                 player.acc = max(0.0, min(100.0, float(msg.get("acc", 100))))
+                player.pos = max(0, min(20000, int(msg.get("pos", 0))))
                 player.idx = max(0, min(len(lobby.playlist) - 1, int(msg.get("idx", 0))))
                 player.chars = max(0, min(2_000_000, int(msg.get("chars", 0))))
                 player.snips = max(0, min(len(lobby.playlist), int(msg.get("snips", 0))))
@@ -835,6 +1100,7 @@ async def ws_lobby(
                         "p": round(player.progress, 4),
                         "wpm": round(player.wpm, 1),
                         "acc": round(player.acc, 1),
+                        "pos": player.pos,
                         "idx": player.idx,
                         "chars": player.chars,
                         "snips": player.snips,
@@ -863,23 +1129,7 @@ async def ws_lobby(
                     await lobby.push_state()
                     await lobby.maybe_finish()
                     continue
-                if player.uid and db.enabled():
-                    try:
-                        await run_in_threadpool(
-                            db.record_race,
-                            player.uid,
-                            lobby.language,
-                            lobby.snip["level"],
-                            lobby.snip["topic"],
-                            player.wpm,
-                            player.acc,
-                            player.time,
-                            player.place,
-                            lobby.code,
-                            player.ip,
-                        )
-                    except Exception as exc:
-                        log.warning("could not record race: %s", exc)
+                # stars, Elo and the DB write all happen once, in score_race()
                 await lobby.system(
                     "%s finished #%d at %.0f wpm" % (player.name, player.place, player.wpm)
                 )
@@ -919,9 +1169,81 @@ async def healthz():
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
-@app.get("/")
+def render_index() -> str:
+    """index.html with {{SITE_URL}} filled in, re-read when the file changes."""
+    path = STATIC_DIR / "index.html"
+    mtime = path.stat().st_mtime
+    if _index_cache["mtime"] != mtime:
+        _index_cache["html"] = path.read_text(encoding="utf-8").replace("{{SITE_URL}}", SITE_URL)
+        _index_cache["mtime"] = mtime
+    return str(_index_cache["html"])
+
+
+@app.get("/", response_class=HTMLResponse)
 async def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    return HTMLResponse(render_index())
+
+
+@app.get("/manifest.webmanifest")
+async def manifest():
+    return JSONResponse(
+        {
+            "name": "CodeRace - type real code",
+            "short_name": "CodeRace",
+            "description": "A multiplayer typing game for real code.",
+            "start_url": "/",
+            "scope": "/",
+            "display": "standalone",
+            "orientation": "any",
+            "background_color": "#0d0f14",
+            "theme_color": "#0d0f14",
+            "categories": ["games", "education", "developer"],
+            "icons": [
+                {"src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png"},
+                {
+                    "src": "/static/icon-512.png",
+                    "sizes": "512x512",
+                    "type": "image/png",
+                    "purpose": "any maskable",
+                },
+                {"src": "/static/favicon.svg", "sizes": "any", "type": "image/svg+xml"},
+            ],
+        },
+        media_type="application/manifest+json",
+    )
+
+
+@app.get("/robots.txt", response_class=PlainTextResponse)
+async def robots():
+    lines = [
+        "User-agent: *",
+        "Allow: /",
+        # lobby URLs are ephemeral and per-game; keep them out of the index
+        "Disallow: /api/",
+        "Disallow: /?l=",
+        "",
+        f"Sitemap: {SITE_URL}/sitemap.xml",
+        "",
+    ]
+    return PlainTextResponse("\n".join(lines))
+
+
+@app.get("/sitemap.xml")
+async def sitemap():
+    today = time.strftime("%Y-%m-%d")
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+        "  <url>",
+        f"    <loc>{SITE_URL}/</loc>",
+        f"    <lastmod>{today}</lastmod>",
+        "    <changefreq>weekly</changefreq>",
+        "    <priority>1.0</priority>",
+        "  </url>",
+        "</urlset>",
+        "",
+    ]
+    return Response(content="\n".join(lines), media_type="application/xml")
 
 
 if __name__ == "__main__":

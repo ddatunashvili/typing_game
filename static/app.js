@@ -74,7 +74,35 @@
     pfErr: $("pfErr"),
     pfCancel: $("pfCancel"),
     pfSave: $("pfSave"),
+    ranksBtn: $("ranksBtn"),
+    ranksBack: $("ranksBack"),
+    ranks: $("screen-ranks"),
+    ranksTable: $("ranksTable"),
+    ranksBots: $("ranksBots"),
+    ranksLadder: $("ranksLadder"),
+    ranksCount: $("ranksCount"),
+    ranksEmpty: $("ranksEmpty"),
+    botPanel: $("botPanel"),
+    botList: $("botList"),
+    addBotBtn: $("addBotBtn"),
+    botModal: $("botModal"),
+    botPickList: $("botPickList"),
+    botCancel: $("botCancel"),
+    runPanel: $("runPanel"),
+    runOut: $("runOut"),
+    runStars: $("runStars"),
+    runTitle: $("runTitle"),
+    ghosts: $("ghosts"),
   };
+
+  /* Colours for opponent carets - each racer keeps the same one. */
+  const GHOST_COLORS = ["#62b6ff", "#ffc46b", "#ff8fa3", "#c79bff", "#7de0d8", "#9ae66e"];
+
+  function ghostColor(id) {
+    let h = 0;
+    for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 997;
+    return GHOST_COLORS[h % GHOST_COLORS.length];
+  }
 
   const LANG_FALLBACK = { markup: "markup", html: "markup" };
 
@@ -103,6 +131,11 @@
     snipLevel: "",
     snipTopic: "",
     soloLevel: "",  // level the solo session is pinned to
+    lastCode: "",   // last snippet played, so a new deck never repeats it
+    bots: [],
+    ranksTimer: 0,
+    output: "",     // expected output of the current snippet
+    runTimer: 0,
     duration: null, // null until /api/meta supplies the default
   };
 
@@ -382,6 +415,7 @@
     if (R.timed && remaining() > 0 && R.idx + 1 < R.playlist.length) {
       R.idx += 1;
       const next = R.playlist[R.idx];
+      S.output = next.output || "";
       paintSnipMeta(next.level, next.topic);
       renderCode(next.code, S.lobby ? S.lobby.language : S.lang);
       armRace();
@@ -402,9 +436,11 @@
     paintHud(w, a, 0);
     el.hint.textContent =
       "time — " + R.snips + " snippet(s), " + liveChars() + " chars, " + Math.round(w) + " wpm";
+    const earned = starsFor(a, R.errors + T.errors, Math.max(1, liveChars()), R.snips > 0);
+    showRun(earned, a, R.snips > 0);
     if (S.solo) {
       showTimedResult(w, a);
-      recordSolo(w, a, runSeconds());
+      recordSolo(w, a, runSeconds(), earned);
     } else {
       send({ t: "progress", p: T.pos / Math.max(1, T.code.length), wpm: w, acc: a,
              idx: R.idx, chars: liveChars(), snips: R.snips });
@@ -422,10 +458,12 @@
       ? "playlist cleared — " + R.snips + " snippet(s) at " + Math.round(w) + " wpm"
       : "done — " + Math.round(w) + " wpm / " + Math.round(a) + "% accuracy";
     el.codeBox.classList.add("locked");
+    const earned = starsFor(a, R.errors + T.errors, Math.max(1, R.chars + T.code.length), true);
+    showRun(earned, a, true);
     if (S.solo) {
       if (timed) showTimedResult(w, a);
       else showSoloResult(w, a, secs);
-      recordSolo(w, a, secs);
+      recordSolo(w, a, secs, earned);
     } else {
       send({
         t: "finish",
@@ -655,6 +693,14 @@
   }
 
   function paintAvatar(node, who) {
+    // bots get a generated identicon instead of an upload
+    if (who && who.bot && who.slug) {
+      node.style.backgroundImage = 'url("/api/bot-avatar/' + who.slug + '.svg")';
+      node.textContent = "";
+      node.classList.add("has-img", "is-bot");
+      return;
+    }
+    node.classList.remove("is-bot");
     const uid = who.uid != null ? who.uid : who.id;
     const version = who.avatar || 0;
     if (uid && version) {
@@ -668,6 +714,99 @@
     }
   }
 
+  function starsHtml(count) {
+    let out = "";
+    for (let i = 0; i < 3; i++) {
+      out += '<span class="star' + (i < count ? " on" : "") + '">' + (i < count ? "★" : "☆") + "</span>";
+    }
+    return out;
+  }
+
+  const STAR_NOTES = {
+    3: "Clean run",
+    2: "Solid, a few slips",
+    1: "Messy - lots of corrections",
+    0: "Rough one",
+  };
+
+  /** Same thresholds the server uses, so the panel and the DB agree. */
+  function starsFor(acc, errors, length, completed) {
+    if (!completed) return 0;
+    const rate = Math.max(0, errors) / Math.max(1, length);
+    if (acc >= 96 && rate <= 0.04) return 3;
+    if (acc >= 88 && rate <= 0.12) return 2;
+    if (acc >= 72) return 1;
+    return 0;
+  }
+
+  /* ---------- simulated run panel ---------- */
+  function showRun(stars, acc, ok) {
+    clearInterval(S.runTimer);
+    el.runStars.innerHTML = starsHtml(stars) +
+      '<em class="star-note">' + (STAR_NOTES[stars] || "") + "</em>";
+    el.runPanel.classList.remove("hidden");
+
+    if (!ok) {
+      el.runTitle.textContent = "not run";
+      el.runOut.textContent = "Snippet incomplete - nothing to run.";
+      return;
+    }
+    el.runTitle.textContent = "simulated run";
+    const text = S.output || "Compiled with no errors. This snippet produces no output.";
+    // type the transcript out, so it reads like a program starting up
+    el.runOut.textContent = "";
+    let i = 0;
+    S.runTimer = setInterval(() => {
+      el.runOut.textContent = text.slice(0, i);
+      i += Math.max(1, Math.ceil(text.length / 90));
+      if (i > text.length) {
+        el.runOut.textContent = text;
+        clearInterval(S.runTimer);
+      }
+    }, 16);
+  }
+
+  function hideRun() {
+    clearInterval(S.runTimer);
+    el.runPanel.classList.add("hidden");
+  }
+
+  /* ---------- opponent carets ---------- */
+  function paintGhosts() {
+    if (!el.ghosts) return;
+    if (!S.lobby || S.solo || !T.chars.length) {
+      el.ghosts.innerHTML = "";
+      return;
+    }
+    const alive = new Set();
+    for (const p of S.lobby.players) {
+      if (p.id === S.pid || p.finished) continue;
+      // only show racers working on the same snippet as me
+      if ((p.idx || 0) !== R.idx) continue;
+      const span = T.chars[Math.min(p.pos || 0, T.chars.length - 1)];
+      if (!span) continue;
+      alive.add(p.id);
+      let node = el.ghosts.querySelector('.peer[data-id="' + p.id + '"]');
+      if (!node) {
+        node = document.createElement("i");
+        node.className = "peer";
+        node.dataset.id = p.id;
+        el.ghosts.appendChild(node);
+      }
+      node.style.setProperty("--c", ghostColor(p.id));
+      node.style.left = span.offsetLeft + "px";
+      node.style.top = span.offsetTop + "px";
+      node.style.height = (span.offsetHeight || 22) + "px";
+      node.title = p.name;  // hover only: a visible label covered the code
+      // flag whoever is ahead of me, so a rush is obvious
+      const me = S.lobby.players.find((x) => x.id === S.pid);
+      node.classList.toggle("ahead", !!me && (p.progress || 0) > (me.progress || 0));
+    }
+    for (const node of [...el.ghosts.children]) {
+      if (!alive.has(node.dataset.id)) node.remove();
+    }
+  }
+
   function paintProfile() {
     const known = !!S.me;
     el.profileBox.classList.toggle("hidden", !known);
@@ -675,8 +814,17 @@
     el.register.classList.toggle("hidden", known || !S.accounts);
     if (known) {
       el.profileName.textContent = S.me.name;
+      el.profileName.title = S.me.rank + " - " + S.me.rating;
       paintAvatar(el.profileAvatar, S.me);
       el.name.value = S.me.name;
+      let badge = el.profileBox.querySelector(".rate");
+      if (!badge) {
+        badge = document.createElement("span");
+        badge.className = "rate";
+        el.profileBox.insertBefore(badge, el.profileEdit);
+      }
+      badge.textContent = S.me.rating;
+      badge.title = S.me.rank;
     }
   }
 
@@ -806,7 +954,7 @@
     }
   }
 
-  async function recordSolo(w, a, secs) {
+  async function recordSolo(w, a, secs, earned) {
     if (!S.me) return;
     try {
       await fetch("/api/race", {
@@ -820,9 +968,13 @@
           wpm: w,
           acc: a,
           seconds: secs,
+          length: Math.max(1, R.chars + T.code.length),
+          errors: R.errors + T.errors,
+          completed: true,
         }),
       });
       loadLeaderboard();
+      loadMe();
     } catch (err) {
       /* a lost stat must never break the run */
     }
@@ -840,6 +992,7 @@
       p: T.pos / Math.max(1, T.code.length),
       wpm: R.timed ? runWpm() : wpm(),
       acc: R.timed ? runAccuracy() : accuracy(),
+      pos: T.pos,
       idx: R.idx,
       chars: liveChars(),
       snips: R.snips,
@@ -901,6 +1054,7 @@
           initRun(S.lobby.duration > 0, S.lobby.playlist || []);
           const first = R.playlist[0];
           if (first) {
+            S.output = first.output || "";
             paintSnipMeta(first.level, first.topic);
             renderCode(first.code, S.lobby.language);
           }
@@ -967,6 +1121,13 @@
         el.countdown.classList.add("hidden");
       }
     }
+    S.output = st.output || "";
+    if (st.state === "waiting" || st.state === "countdown") hideRun();
+    paintGhosts();
+    el.addBotBtn.classList.toggle(
+      "hidden",
+      !(isHost && (st.state === "waiting" || st.state === "finished"))
+    );
     if (st.state === "racing" && !T.running && !R.over && me && !me.finished) {
       // ends_at is a unix time in seconds; the server ends the race either way.
       const leftMs = st.ends_at ? st.ends_at * 1000 - Date.now() : 0;
@@ -976,7 +1137,11 @@
     renderRacers(st);
     if (st.state === "finished") {
       renderResults(st);
-      if (S.me) loadLeaderboard();
+      if (S.me) {
+        loadLeaderboard();
+        loadMe();  // the rating may have moved
+      }
+      if (!el.ranks.classList.contains("hidden")) loadRankings();
     }
   }
 
@@ -990,7 +1155,9 @@
     if (m.chars != null) p.chars = m.chars;
     if (m.snips != null) p.snips = m.snips;
     if (m.idx != null) p.idx = m.idx;
+    if (m.pos != null) p.pos = m.pos;
     paintRacer(p);
+    paintGhosts();
   }
 
   function updateSelfBar(force) {
@@ -1010,7 +1177,8 @@
     row.className = "racer" + (p.id === S.pid ? " me" : "");
     row.dataset.id = p.id;
     row.innerHTML =
-      '<div class="who"><span class="avatar sm"></span><span class="nm"></span><span class="tag"></span></div>' +
+      '<div class="who"><span class="dotc"></span><span class="avatar sm"></span>' +
+      '<span class="nm"></span><span class="rate sm"></span><span class="tag"></span></div>' +
       '<div class="bar"><i></i></div>' +
       '<div class="stat"><b class="w">0</b> wpm · <span class="a">100</span>%</div>';
     el.racers.appendChild(row);
@@ -1022,6 +1190,17 @@
     if (!row) return;
     row.querySelector(".nm").textContent = p.name;
     paintAvatar(row.querySelector(".avatar"), p);
+    row.classList.toggle("is-bot", !!p.bot);
+    const dot = row.querySelector(".dotc");
+    if (dot) {
+      // matches this racer's caret colour in the code area
+      dot.style.background = p.id === S.pid ? "var(--accent)" : ghostColor(p.id);
+    }
+    const rate = row.querySelector(".rate");
+    if (rate) {
+      rate.textContent = p.rating || "";
+      rate.title = (p.rank || "") + (p.bot ? " (bot)" : "");
+    }
     const tag = row.querySelector(".tag");
     const host = S.lobby && S.lobby.host === p.id;
     let label = "";
@@ -1054,21 +1233,28 @@
       timed ? (b.chars || 0) - (a.chars || 0) : (a.place || 99) - (b.place || 99)
     );
     const head = timed
-      ? "<tr><th>#</th><th>player</th><th>snippets</th><th>chars</th><th>wpm</th><th>acc</th></tr>"
-      : "<tr><th>#</th><th>player</th><th>wpm</th><th>acc</th><th>time</th></tr>";
+      ? "<tr><th>#</th><th>player</th><th>stars</th><th>snippets</th><th>chars</th><th>wpm</th><th>acc</th><th>&plusmn;</th></tr>"
+      : "<tr><th>#</th><th>player</th><th>stars</th><th>wpm</th><th>acc</th><th>time</th><th>&plusmn;</th></tr>";
     el.results.innerHTML =
       "<h3>results" + (timed ? " · " + durationLabel(st.duration) : "") + "</h3><table>" +
       head +
       rows
         .map((p) => {
+          const delta = p.delta
+            ? '<span class="' + (p.delta > 0 ? "up" : "down") + '">' +
+              (p.delta > 0 ? "+" : "") + p.delta + "</span>"
+            : '<span class="flat">-</span>';
           const cells = timed
-            ? "<td>" + (p.snips || 0) + "</td><td>" + (p.chars || 0) + "</td><td>" +
-              Math.round(p.wpm) + "</td><td>" + Math.round(p.acc) + "%</td>"
-            : "<td>" + Math.round(p.wpm) + "</td><td>" + Math.round(p.acc) + "%</td><td>" +
-              (p.time != null ? p.time.toFixed(1) + "s" : "-") + "</td>";
+            ? '<td class="stars">' + starsHtml(p.stars || 0) + "</td><td>" +
+              (p.snips || 0) + "</td><td>" + (p.chars || 0) + "</td><td>" +
+              Math.round(p.wpm) + "</td><td>" + Math.round(p.acc) + "%</td><td>" + delta + "</td>"
+            : '<td class="stars">' + starsHtml(p.stars || 0) + "</td><td>" +
+              Math.round(p.wpm) + "</td><td>" + Math.round(p.acc) + "%</td><td>" +
+              (p.time != null ? p.time.toFixed(1) + "s" : "-") + "</td><td>" + delta + "</td>";
           return (
-            '<tr class="' + (p.id === S.pid ? "me" : "") + '"><td>' +
-            (p.place || "-") + "</td><td>" + escapeHtml(p.name) + "</td>" + cells + "</tr>"
+            '<tr class="' + (p.id === S.pid ? "me" : "") + (p.bot ? " bot" : "") + '"><td>' +
+            (p.place || "-") + "</td><td>" + escapeHtml(p.name) +
+            (p.bot ? ' <em class="botflag">bot</em>' : "") + "</td>" + cells + "</tr>"
           );
         })
         .join("") +
@@ -1125,6 +1311,153 @@
     return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   }
 
+  /* ---------- bots ---------- */
+  function botCard(bot, onPick, label) {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "bot-card";
+    card.innerHTML =
+      '<span class="avatar"></span>' +
+      '<span class="bot-mid"><span class="bot-name"></span>' +
+      '<span class="bot-blurb muted"></span></span>' +
+      '<span class="bot-right"><b class="bot-rate"></b>' +
+      '<span class="bot-rank muted"></span></span>';
+    paintAvatar(card.querySelector(".avatar"), { bot: true, slug: bot.slug, name: bot.name });
+    card.querySelector(".bot-name").textContent = bot.name;
+    card.querySelector(".bot-blurb").textContent = bot.blurb;
+    card.querySelector(".bot-rate").textContent = bot.rating;
+    card.querySelector(".bot-rank").textContent = bot.rank + " - " + bot.wpm + " wpm";
+    card.title = label || ("Challenge " + bot.name);
+    if (onPick) card.onclick = () => onPick(bot);
+    else card.disabled = true;
+    return card;
+  }
+
+  async function loadBots() {
+    try {
+      const res = await fetch("/api/bots");
+      const data = await res.json();
+      S.bots = data.bots || [];
+    } catch (err) {
+      S.bots = [];
+    }
+    el.botList.innerHTML = "";
+    for (const bot of S.bots) el.botList.appendChild(botCard(bot, challengeBot));
+    el.botPanel.classList.toggle("hidden", !S.bots.length);
+  }
+
+  async function challengeBot(bot) {
+    el.homeErr.textContent = "";
+    const qs =
+      "lang=" + encodeURIComponent(S.lang) +
+      "&duration=" + (S.duration || 0) +
+      "&bot=" + encodeURIComponent(bot.slug) +
+      (filterQuery() ? "&" + filterQuery() : "");
+    const res = await fetch("/api/lobby/new?" + qs);
+    const { code } = await res.json();
+    S.solo = false;
+    connect(code, true);
+  }
+
+  function openBotPicker() {
+    el.botPickList.innerHTML = "";
+    const seated = new Set(
+      (S.lobby ? S.lobby.players : []).filter((p) => p.bot).map((p) => p.slug)
+    );
+    for (const bot of S.bots) {
+      const taken = seated.has(bot.slug);
+      el.botPickList.appendChild(
+        botCard(
+          bot,
+          taken ? null : (b) => { send({ t: "bot", v: b.slug }); closeBotPicker(); },
+          taken ? "already in the lobby" : "Add " + bot.name
+        )
+      );
+    }
+    el.botModal.classList.remove("hidden");
+  }
+
+  function closeBotPicker() {
+    el.botModal.classList.add("hidden");
+  }
+
+  /* ---------- rankings ---------- */
+  function rankRow(i, row, isMe) {
+    const line = document.createElement("div");
+    line.className = "rank-row" + (isMe ? " me" : "") + (row.bot ? " bot" : "");
+    line.innerHTML =
+      '<span class="rk-i"></span><span class="avatar sm"></span>' +
+      '<span class="rk-name"></span><span class="rk-title muted"></span>' +
+      '<b class="rk-rate"></b><span class="rk-sub muted"></span>';
+    line.querySelector(".rk-i").textContent = i;
+    paintAvatar(line.querySelector(".avatar"), row);
+    line.querySelector(".rk-name").textContent = row.name;
+    line.querySelector(".rk-title").textContent = row.rank || "";
+    line.querySelector(".rk-rate").textContent = row.rating;
+    line.querySelector(".rk-sub").textContent = row.bot
+      ? row.wpm + " wpm"
+      : (row.races || 0) + " races - " + Math.round(row.best_wpm || 0) + " wpm best";
+    return line;
+  }
+
+  async function loadRankings() {
+    try {
+      const res = await fetch("/api/rankings?limit=50", { credentials: "same-origin" });
+      const data = await res.json();
+      const rows = data.rows || [];
+      el.ranksTable.innerHTML = "";
+      rows.forEach((row, i) =>
+        el.ranksTable.appendChild(rankRow(i + 1, row, data.me && data.me.id === row.id))
+      );
+      el.ranksCount.textContent = rows.length ? rows.length + " rated" : "";
+      el.ranksEmpty.classList.toggle("hidden", rows.length > 0);
+
+      // your own row, when you are outside the top 50
+      if (data.me && !rows.some((r) => r.id === data.me.id)) {
+        const mine = rankRow("you", data.me, true);
+        mine.classList.add("outside");
+        el.ranksTable.appendChild(mine);
+      }
+
+      el.ranksBots.innerHTML = "";
+      (data.bots || []).slice().reverse().forEach((bot, i) =>
+        el.ranksBots.appendChild(rankRow(i + 1, bot, false))
+      );
+
+      el.ranksLadder.innerHTML = "";
+      for (const tier of data.ranks || []) {
+        const chip = document.createElement("span");
+        chip.className = "tier";
+        chip.innerHTML = '<b></b><span></span>';
+        chip.querySelector("b").textContent = tier.title;
+        chip.querySelector("span").textContent = tier.floor + "+";
+        el.ranksLadder.appendChild(chip);
+      }
+    } catch (err) {
+      el.ranksEmpty.classList.remove("hidden");
+    }
+  }
+
+  function showRanks() {
+    el.home.classList.add("hidden");
+    el.room.classList.add("hidden");
+    el.ranks.classList.remove("hidden");
+    loadRankings();
+    clearInterval(S.ranksTimer);
+    // live board: re-read while the page is open
+    S.ranksTimer = setInterval(() => {
+      if (!el.ranks.classList.contains("hidden")) loadRankings();
+      else clearInterval(S.ranksTimer);
+    }, 15000);
+  }
+
+  function hideRanks() {
+    clearInterval(S.ranksTimer);
+    el.ranks.classList.add("hidden");
+    if (S.room) el.room.classList.remove("hidden");
+    else el.home.classList.remove("hidden");
+  }
+
   // ---------- screens ----------
   function currentName() {
     if (S.me) return S.me.name;
@@ -1136,6 +1469,9 @@
     S.room = null;
     S.solo = false;
     stopRace();
+    hideRun();
+    el.ranks.classList.add("hidden");
+    if (el.ghosts) el.ghosts.innerHTML = "";
     el.home.classList.remove("hidden");
     el.room.classList.add("hidden");
     el.leave.classList.add("hidden");
@@ -1146,6 +1482,7 @@
   }
 
   function showRoom() {
+    el.ranks.classList.add("hidden");
     el.hudSnipsBox.classList.toggle("hidden", !R.timed);
     el.homeErr.textContent = "";
     el.home.classList.add("hidden");
@@ -1158,6 +1495,7 @@
     el.start.classList.toggle("hidden", S.solo);
     el.filterBtn.classList.toggle("hidden", S.solo);
     el.newSnip.classList.toggle("hidden", S.solo);
+    el.addBotBtn.classList.toggle("hidden", S.solo);
     document.querySelector(".room-meta").classList.toggle("hidden", S.solo);
     focusTrap();
   }
@@ -1184,14 +1522,19 @@
   async function soloNext() {
     const key = soloKey();
     if (key !== SOLO.key || !SOLO.deck.length) {
+      // unique=1 means one pass over the whole pool: no snippet twice until
+      // every other one has been seen
       const qs =
         "lang=" + encodeURIComponent(S.lang) +
-        "&size=40" +
+        "&size=400&unique=1" +
         (S.soloLevel ? "&level=" + encodeURIComponent(S.soloLevel) : "") +
         (filterQuery() ? "&" + filterQuery() : "");
       const res = await fetch("/api/playlist?" + qs);
       const data = await res.json();
-      SOLO.deck = data.playlist || [];
+      let deck = data.playlist || [];
+      // a refetched deck should not open with the snippet just played
+      if (deck.length > 1 && S.lastCode && deck[0].code === S.lastCode) deck.push(deck.shift());
+      SOLO.deck = deck;
       SOLO.key = key;
     }
     return SOLO.deck.shift();
@@ -1215,6 +1558,7 @@
       }
       el.again.textContent = "Run again";
       const first = R.playlist[0];
+      S.output = first.output || "";
       paintSnipMeta(first.level, first.topic);
       renderCode(first.code, S.lang);
       armRace(performance.now() + S.duration * 1000);
@@ -1230,6 +1574,8 @@
     }
     // stay on this level from now on
     S.soloLevel = next.level;
+    S.lastCode = next.code;
+    S.output = next.output || "";
     paintSnipMeta(next.level, next.topic);
     renderCode(next.code, S.lang);
     armRace();
@@ -1344,6 +1690,14 @@
     if (e.target === el.modal) closeProfile();
   };
 
+  el.ranksBtn.onclick = () => (el.ranks.classList.contains("hidden") ? showRanks() : hideRanks());
+  el.ranksBack.onclick = hideRanks;
+  el.addBotBtn.onclick = openBotPicker;
+  el.botCancel.onclick = closeBotPicker;
+  el.botModal.onclick = (e) => {
+    if (e.target === el.botModal) closeBotPicker();
+  };
+
   el.topicAll.onclick = () => {
     const cat = catalogFor(S.lang);
     S.topics = cat ? Object.keys(cat.topics) : [];
@@ -1391,6 +1745,8 @@
   el.trap.addEventListener("blur", () => el.codeBox.classList.remove("focus"));
   document.addEventListener("keydown", (e) => {
     if (!el.modal.classList.contains("hidden")) return;
+    if (!el.botModal.classList.contains("hidden")) return;
+    if (!el.ranks.classList.contains("hidden")) return;
     if (document.activeElement === el.chatInput || document.activeElement === el.name ||
         document.activeElement === el.joinCode) return;
     onKeyDown(e);
@@ -1398,9 +1754,11 @@
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && document.activeElement === el.chatInput) focusTrap();
     if (e.key === "Escape" && !el.modal.classList.contains("hidden")) closeProfile();
+    if (e.key === "Escape" && !el.botModal.classList.contains("hidden")) closeBotPicker();
+    if (e.key === "Escape" && !el.ranks.classList.contains("hidden")) hideRanks();
   });
 
-  Promise.all([initMeta(), loadMe()]).then(() => {
+  Promise.all([initMeta(), loadMe(), loadBots()]).then(() => {
     const code = new URLSearchParams(location.search).get("l");
     if (code) joinLobby(code);
   });

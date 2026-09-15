@@ -202,18 +202,30 @@ def playlist(
     size: int,
     levels_filter: Optional[Iterable[str]] = None,
     topics_filter: Optional[Iterable[str]] = None,
+    level: Optional[str] = None,
+    unique: bool = False,
 ) -> List[dict]:
     """An ordered run of snippets for a timed race.
 
-    Every racer works through the same list, so the mode stays fair. The pool is
-    shuffled and repeated when it is smaller than the requested length.
+    Every racer works through the same list, so the mode stays fair. Each pass is
+    a fresh shuffle, and a pass never starts with the snippet the previous one
+    ended on, so nothing repeats back to back.
+
+    `unique=True` caps the run at one pass, i.e. no snippet twice at all.
     """
-    pool = pool_for(language, levels_filter, topics_filter)
-    size = max(1, min(60, size))
+    pool = pool_for(language, levels_filter, topics_filter, level)
+    if not pool:
+        return []
+    size = max(1, min(400, size))
+    if unique:
+        size = min(size, len(pool))
+
     out: List[dict] = []
     while len(out) < size:
         batch = pool[:]
         random.shuffle(batch)
+        if out and len(batch) > 1 and batch[0]["code"] == out[-1]["code"]:
+            batch.append(batch.pop(0))  # don't repeat across the seam
         out.extend(batch)
     return out[:size]
 

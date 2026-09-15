@@ -59,13 +59,71 @@ A race is either **classic** (one snippet, ends when you finish it) or **timed**
 - `playlist_size` (default 12) sets how many snippets a lobby playlist holds; solo timed runs
   request 40. The pool is reshuffled and repeated when it is smaller than that.
 
+## Stars, ratings and ranks
+
+Every finished run gets **0-3 stars**, scored on accuracy and the error rate so a long
+sloppy run cannot coast on a round percentage:
+
+| stars | condition | note |
+| --- | --- | --- |
+| 3 | accuracy >= 96% and <= 4% error rate | Clean run |
+| 2 | accuracy >= 88% and <= 12% error rate | Solid, a few slips |
+| 1 | accuracy >= 72% | Messy - lots of corrections |
+| 0 | below that, or unfinished | Rough one |
+
+Multiplayer races also move an **Elo rating** (start 1200, K-factor 24), scored pairwise
+against everyone in the lobby and averaged, so a crowded lobby is not worth more than a
+duel and beating someone stronger pays more. Bots and unregistered guests count as
+opposition but carry no rating of their own. Solo runs earn stars but never move the rating.
+
+Rank titles run from **Rubber Duck** through Script Kiddie, Intern, Junior/Mid/Senior Dev,
+Tech Lead, Architect, Principal and 10x Engineer up to **Kernel Hacker** at 2300.
+
+The **Rankings** page in the top bar lists rated players, the full bot ladder and the rank
+tiers, and re-reads itself every 15 seconds (plus immediately after any race finishes).
+
+## Simulated run
+
+When a snippet is finished the run panel shows the output that snippet produces.
+
+**Nothing is executed.** Running code typed by a stranger in 15 languages would be a
+sandbox-escape risk and a large amount of infrastructure, so each snippet carries a stored
+transcript (`cr_snippets.output`) written by hand, plus a short demo call where the snippet
+only defines things. Because every racer types the same snippet the result is deterministic,
+so the transcript is accurate for what it claims to be - and the panel says so in as many
+words. 74 of the 117 seed snippets have one; the rest report that they compiled with no
+output. Add more with SQL:
+
+```sql
+UPDATE cr_snippets SET output = '>>> square(7)
+49' WHERE id = 12;
+```
+
+## Bots
+
+Thirteen bot opponents from **Rubber Duck** (750, 18 wpm) to **Kernel Panic Kim**
+(2250, 138 wpm), each with a rating, a target speed and a deterministic identicon
+generated from its name (`/api/bot-avatar/{slug}.svg` - a mirrored 5x5 grid, no external
+service). They type at their target wpm with jitter and occasional hesitations rather than
+at a flat rate.
+
+Challenge one from the home screen, or add one mid-lobby with **+ bot**. Bots are always
+ready, so hitting **Ready** starts the race.
+
+## Opponent carets
+
+While a race is running you see every other racer's caret in the code, in their own colour
+with their name on it. A caret that is ahead of yours pulses, so a rush is obvious. Carets
+only show for racers on the same snippet as you, which matters in timed mode where players
+drift apart in the playlist.
+
 ## Profiles
 
 Optional — the game is fully playable without them, and everything below turns itself off
 when no database is configured.
 
-- **Register** in the top bar with a display name, and optionally a profile image
-  (png / jpeg / gif / webp, up to 512 KB).
+- **Register** in the top bar with a display name, and optionally a profile image you
+  upload yourself (png / jpeg / gif / webp, up to 512 KB).
 - You are **recognised automatically** on your next visit: registering sets a long-lived
   `HttpOnly` cookie holding a random token, and only the SHA-256 of that token is stored.
 - Avatars are kept in MySQL as BLOBs, not on disk — the panel replaces `/home/container`
@@ -74,6 +132,19 @@ when no database is configured.
   chat, and have finished races recorded for the leaderboard.
 - IP addresses are stored per player (last seen, plus a per-IP hit log). That is personal
   data — make sure that is what you want before deploying publicly.
+
+## SEO and embeds
+
+- Full meta set in `static/index.html`: title, description, canonical, robots
+  (`max-image-preview:large`), theme-color, Open Graph (including `og:image:width/height`
+  and alt text), Twitter `summary_large_image`, and a `WebApplication` JSON-LD block.
+- `{{SITE_URL}}` in the markup is substituted at serve time from the `SITE_URL` env var,
+  because social scrapers reject relative image URLs. Set it to your real origin.
+- Generated assets in `static/`, rebuilt with `python tools/make_assets.py`:
+  `og.png` (1200x630 social card), `icon-512.png`, `icon-192.png`,
+  `apple-touch-icon.png` (180x180), `favicon.svg` and `favicon.ico`.
+- `/manifest.webmanifest`, `/robots.txt` and `/sitemap.xml` are served by the app.
+  Lobby URLs (`/?l=CODE`) are excluded from crawling - they are ephemeral.
 
 ## Layout
 
@@ -101,7 +172,11 @@ layout does not jump when one appears.
 | `static/app.js` | typing engine, per-char highlighting, filters, profile, lobby client |
 | `static/style.css` | dark theme |
 | `static/index.html` | markup + Prism component loading |
-| `deploy/nginx.conf` | reverse proxy with TLS and WebSocket upgrade |
+| `rating.py` | stars, Elo and rank titles |
+| `bots.py` | bot roster and generated identicons |
+| `outputs.py` | demo transcripts for the simulated run panel |
+| `tools/make_assets.py` | regenerates the OG card and icons |
+| `deploy/nginx.conf` | reverse proxy with TLS, WebSocket upgrade and static caching |
 
 ## API
 
@@ -125,13 +200,17 @@ Accounts (all no-ops when no database is configured):
 - `POST /api/avatar` (multipart `file`) — upload a profile image
 - `DELETE /api/avatar` — remove it
 - `GET /api/avatar/{user_id}` — serve it
-- `GET /api/leaderboard?limit=10` — best WPM
+- `GET /api/leaderboard?limit=10` — top players by rating
+- `GET /api/rankings?limit=50` — the rankings board, the viewer's own row, bots and tiers
+- `GET /api/bots` — the bot roster with ratings
+- `GET /api/bot-avatar/{slug}.svg` — generated bot identicon
 - `POST /api/race` — record a solo result (lobby races are recorded server-side)
 
 Websocket `WS /ws/{code}?name=&pid=&create=0|1&lang=&levels=&topics=&duration=`
 
 Client → server: `chat`, `ready`, `start`, `restart`, `again`, `lang`, `filters`,
-`duration`, `progress`, `finish` — `again` swaps the snippet, `restart` starts another race
+`duration`, `bot`, `unbot`, `progress`, `finish` — `again` swaps the snippet, `restart`
+starts another race, `bot`/`unbot` seat and remove a bot (host only)
 Server → client: `hello`, `state`, `chat`, `countdown`, `go`, `prog`, `time_up`, `error`
 
 ## Where the snippets live
@@ -228,6 +307,7 @@ production so the panel's injected value wins.
 | `DATABASE_URL` | unset | alternative to the five `MYSQL_*` vars; a `jdbc:` prefix and percent-encoded passwords are accepted |
 | `MYSQL_CONNECT_TIMEOUT` | `8` | seconds before giving up on the database |
 | `LIBRARY_REFRESH_SECONDS` | `60` | how often the snippet library and settings are re-read |
+| `SITE_URL` | `https://typing.renode.space` | absolute origin for canonical and Open Graph tags |
 | `COUNTDOWN_SECONDS` / `CHAT_HISTORY` / `RACE_SECONDS` / `PLAYLIST_SIZE` | see above | seed values for `cr_config` on first start |
 
 Leave the database vars unset to run with accounts disabled and the seed snippets in use.

@@ -3,8 +3,73 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>CodeRace — type real code</title>
-<link rel="preconnect" href="https://cdnjs.cloudflare.com" />
+
+<title>CodeRace — type real code, race your friends</title>
+<meta name="description" content="A multiplayer typing game for real code. 15 languages, 4 difficulty levels, topic filters, timed races and bot opponents with ratings. Free, no install." />
+<link rel="canonical" href="{{SITE_URL}}/" />
+<meta name="robots" content="index, follow, max-image-preview:large" />
+<meta name="theme-color" content="#0d0f14" />
+<meta name="color-scheme" content="dark" />
+<meta name="application-name" content="CodeRace" />
+<meta name="keywords" content="typing game, code typing, typing speed test, programming practice, wpm test, multiplayer typing, typeracer for code" />
+
+<!-- Open Graph (Facebook, Discord, Slack, LinkedIn) -->
+<meta property="og:type" content="website" />
+<meta property="og:site_name" content="CodeRace" />
+<meta property="og:url" content="{{SITE_URL}}/" />
+<meta property="og:title" content="CodeRace — type real code, race your friends" />
+<meta property="og:description" content="A multiplayer typing game for real code. 15 languages, 4 levels, timed races and bot opponents with ratings." />
+<meta property="og:image" content="{{SITE_URL}}/static/og.png" />
+<meta property="og:image:secure_url" content="{{SITE_URL}}/static/og.png" />
+<meta property="og:image:type" content="image/png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:image:alt" content="CodeRace: a syntax-highlighted Python snippet being raced against Regex Randy and Segfault Sally" />
+<meta property="og:locale" content="en_US" />
+
+<!-- Twitter / X -->
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="CodeRace — type real code, race your friends" />
+<meta name="twitter:description" content="A multiplayer typing game for real code. 15 languages, 4 levels, timed races and bot opponents with ratings." />
+<meta name="twitter:image" content="{{SITE_URL}}/static/og.png" />
+<meta name="twitter:image:alt" content="CodeRace race screen with live WPM bars" />
+
+<!-- icons + installability -->
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+<link rel="icon" href="/static/favicon.ico" sizes="32x32" />
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png" />
+<link rel="manifest" href="/manifest.webmanifest" />
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebApplication",
+  "name": "CodeRace",
+  "url": "{{SITE_URL}}/",
+  "description": "A multiplayer typing game for real code, with 15 languages, four difficulty levels, topic filters, timed races and rated bot opponents.",
+  "applicationCategory": "GameApplication",
+  "applicationSubCategory": "Typing game",
+  "operatingSystem": "Any modern browser",
+  "browserRequirements": "Requires JavaScript and WebSocket support",
+  "image": "{{SITE_URL}}/static/og.png",
+  "screenshot": "{{SITE_URL}}/static/og.png",
+  "inLanguage": "en",
+  "isAccessibleForFree": true,
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "featureList": [
+    "15 programming languages",
+    "Four difficulty levels",
+    "Topic filters",
+    "Timed races with shuffled playlists",
+    "Multiplayer lobbies with live progress and chat",
+    "Rated bot opponents",
+    "Star ratings and Elo ranks"
+  ]
+}
+</script>
+
+<link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin />
+<link rel="dns-prefetch" href="https://cdnjs.cloudflare.com" />
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" />
 <link rel="stylesheet" href="/static/style.css" />
 </head>
@@ -22,6 +87,7 @@
       <span>name</span>
       <input id="nameInput" maxlength="18" placeholder="Guest" autocomplete="off" />
     </label>
+    <button id="ranksBtn" class="ghost">Rankings</button>
     <button id="registerBtn" class="primary hidden">Register</button>
     <button id="leaveBtn" class="ghost hidden">leave</button>
   </div>
@@ -76,9 +142,46 @@
     </section>
     <p id="homeErr" class="err"></p>
 
+    <section class="panel" id="botPanel">
+      <h2>challenge a bot <span class="muted">pick an opponent by rating</span></h2>
+      <div id="botList" class="bot-list"></div>
+    </section>
+
     <section class="panel hidden" id="lbPanel">
       <h2>leaderboard <span class="muted">best wpm</span></h2>
       <div id="leaderboard" class="lb"></div>
+    </section>
+  </div>
+</main>
+
+<!-- RANKINGS -->
+<main id="screen-ranks" class="screen hidden">
+  <div class="home-wrap">
+    <div class="ranks-head">
+      <h1>Rankings</h1>
+      <button id="ranksBack" class="ghost">back to game</button>
+    </div>
+    <p class="sub">
+      Elo-style ratings. Win a race and you take points off whoever you beat
+      &mdash; beating someone stronger is worth more. <span id="ranksLive" class="live">live</span>
+    </p>
+
+    <section class="panel">
+      <h2>players <span id="ranksCount" class="muted"></span></h2>
+      <div id="ranksTable" class="ranks"></div>
+      <p id="ranksEmpty" class="muted hidden">
+        No rated races yet. Register and beat a bot to get on the board.
+      </p>
+    </section>
+
+    <section class="panel">
+      <h2>bots <span class="muted">always available</span></h2>
+      <div id="ranksBots" class="ranks"></div>
+    </section>
+
+    <section class="panel">
+      <h2>rank titles</h2>
+      <div id="ranksLadder" class="ladder"></div>
     </section>
   </div>
 </main>
@@ -104,6 +207,7 @@
         <button id="copyLink" class="code-pill" title="copy invite link"><span id="codeText">-----</span> ⧉</button>
         <select id="langSelect" class="lang-select"></select>
         <button id="filterBtn" class="ghost" type="button">filters</button>
+        <button id="addBotBtn" class="ghost" type="button">+ bot</button>
       </div>
       <div class="room-ctl">
         <span id="snipMeta" class="snip-meta"></span>
@@ -142,14 +246,41 @@
         <div class="hud-item"><b id="hudLeft">0</b><span>left</span></div>
         <div class="hud-item" id="hudSnipsBox"><b id="hudSnips">0</b><span>done</span></div>
       </div>
-      <div id="codeBox" class="code-box"><pre id="codeArea" class="code-area"></pre></div>
+      <div id="codeBox" class="code-box">
+        <pre id="codeArea" class="code-area"></pre>
+        <div id="ghosts" class="ghosts"></div>
+      </div>
       <input id="trap" class="trap" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
       <p id="hint" class="hint">click here and start typing — indentation is auto-skipped</p>
+    </div>
+
+    <div id="runPanel" class="run hidden">
+      <div class="run-head">
+        <span class="run-dots"><i></i><i></i><i></i></span>
+        <span id="runTitle">simulated run</span>
+        <span id="runStars" class="stars"></span>
+      </div>
+      <pre id="runOut" class="run-out"></pre>
+      <p class="run-note muted">
+        Simulated: the expected output for this snippet, not a live interpreter.
+      </p>
     </div>
 
     <div id="results" class="results hidden"></div>
   </section>
 </main>
+
+<!-- BOT PICKER -->
+<div id="botModal" class="modal hidden">
+  <div class="modal-card wide">
+    <h3>Add a bot</h3>
+    <p class="muted">Bots are always ready, so the race starts when you hit Ready.</p>
+    <div id="botPickList" class="bot-list"></div>
+    <div class="modal-ctl">
+      <button id="botCancel" class="ghost" type="button">close</button>
+    </div>
+  </div>
+</div>
 
 <!-- PROFILE -->
 <div id="profileModal" class="modal hidden">
