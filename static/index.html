@@ -55,6 +55,15 @@
       <p id="filterWarn" class="warn hidden"></p>
     </section>
 
+    <section class="panel">
+      <h2>race time <span id="durationHint" class="muted"></span></h2>
+      <div id="durationChips" class="chips"></div>
+      <p class="muted">
+        Timed: when you finish a snippet and the clock is still running, the next one
+        appears. Ranking is by characters typed.
+      </p>
+    </section>
+
     <section class="actions">
       <button id="soloBtn" class="primary big">Practice solo</button>
       <button id="createBtn" class="accent big">Create lobby</button>
@@ -112,6 +121,10 @@
         <span class="fl-label">topics</span>
         <div id="roomTopicChips" class="chips"></div>
       </div>
+      <div class="fl">
+        <span class="fl-label">time</span>
+        <div id="roomDurationChips" class="chips"></div>
+      </div>
       <p id="roomFilterNote" class="muted"></p>
     </div>
 
@@ -124,6 +137,7 @@
         <div class="hud-item"><b id="hudAcc">100%</b><span>acc</span></div>
         <div class="hud-item"><b id="hudTime">0.0s</b><span>time</span></div>
         <div class="hud-item"><b id="hudLeft">0</b><span>left</span></div>
+        <div class="hud-item" id="hudSnipsBox"><b id="hudSnips">0</b><span>done</span></div>
       </div>
       <div id="codeBox" class="code-box"><pre id="codeArea" class="code-area"></pre></div>
       <input id="trap" class="trap" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />

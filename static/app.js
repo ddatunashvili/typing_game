@@ -23,6 +23,11 @@
     topicAll: $("topicAll"),
     topicNone: $("topicNone"),
     filterWarn: $("filterWarn"),
+    durationChips: $("durationChips"),
+    durationHint: $("durationHint"),
+    roomDurationChips: $("roomDurationChips"),
+    hudSnips: $("hudSnips"),
+    hudSnipsBox: $("hudSnipsBox"),
     solo: $("soloBtn"),
     create: $("createBtn"),
     joinForm: $("joinForm"),
@@ -96,7 +101,70 @@
     lobby: null,
     snipLevel: "",
     snipTopic: "",
+    duration: null, // null until /api/meta supplies the default
   };
+
+  const DURATIONS = [
+    { v: 0, label: "One snippet" },
+    { v: 30, label: "30s" },
+    { v: 60, label: "1 min" },
+    { v: 120, label: "2 min" },
+    { v: 300, label: "5 min" },
+  ];
+
+  /* Timed run: a playlist typed end to end until the clock stops. */
+  const R = {
+    timed: false,
+    playlist: [],
+    idx: 0,
+    chars: 0,      // correct characters across every snippet so far
+    typed: 0,      // correct keystrokes, for cumulative accuracy
+    errors: 0,
+    snips: 0,      // snippets completed
+    endsAt: 0,     // performance.now() deadline
+    startedAt: 0,
+    over: false,
+  };
+
+  function initRun(timed, playlist) {
+    R.timed = !!timed;
+    R.playlist = playlist || [];
+    R.idx = 0;
+    R.chars = 0;
+    R.typed = 0;
+    R.errors = 0;
+    R.snips = 0;
+    R.endsAt = 0;
+    R.startedAt = 0;
+    R.over = false;
+    el.hudSnipsBox.classList.toggle("hidden", !timed);
+  }
+
+  function runSeconds() {
+    return R.startedAt ? (performance.now() - R.startedAt) / 1000 : 0;
+  }
+
+  function remaining() {
+    if (!R.timed || !R.endsAt) return 0;
+    return Math.max(0, (R.endsAt - performance.now()) / 1000);
+  }
+
+  /** Characters completed, including the snippet currently being typed. */
+  function liveChars() {
+    return R.chars + T.pos;
+  }
+
+  function runWpm() {
+    const secs = runSeconds();
+    if (secs < 0.5) return 0;
+    return (liveChars() / 5) / (secs / 60);
+  }
+
+  function runAccuracy() {
+    const good = R.typed + T.typed;
+    const total = good + R.errors + T.errors;
+    return total ? (good / total) * 100 : 100;
+  }
 
   // ---------- typing engine ----------
   const T = {
@@ -181,10 +249,15 @@
       box.scrollTop = top + h - box.clientHeight + 24;
   }
 
-  function armRace() {
+  function armRace(endsAtMs) {
     T.running = true;
+    R.over = false;
+    if (!R.startedAt) R.startedAt = performance.now();
+    if (endsAtMs != null) R.endsAt = endsAtMs;
     el.codeBox.classList.remove("locked");
-    el.hint.textContent = "type! — indentation is auto-skipped";
+    el.hint.textContent = R.timed
+      ? "type! — a new snippet appears while the clock runs"
+      : "type! — indentation is auto-skipped";
     focusTrap();
     loop();
   }
@@ -217,7 +290,17 @@
 
   function loop() {
     if (!T.running) return;
-    paintHud(wpm(), accuracy(), elapsed());
+    if (R.timed) {
+      const left = remaining();
+      paintHud(runWpm(), runAccuracy(), left);
+      el.hudSnips.textContent = R.snips;
+      if (R.endsAt && left <= 0) {
+        timeUp();
+        return;
+      }
+    } else {
+      paintHud(wpm(), accuracy(), elapsed());
+    }
     const now = performance.now();
     if (now - T.lastSend > 250) {
       T.lastSend = now;
@@ -252,7 +335,7 @@
       markCursor();
       scrollToCursor();
       el.hudLeft.textContent = T.code.length - T.pos;
-      if (T.pos >= T.code.length) finishRace();
+      if (T.pos >= T.code.length) snippetDone();
       return;
     }
 
@@ -286,19 +369,70 @@
     if (e.key.length === 1) { e.preventDefault(); typeChar(e.key); }
   }
 
-  function finishRace() {
-    const secs = elapsed();
-    const w = wpm();
-    const a = accuracy();
+  /** One snippet completed: bank it, then continue or end the race. */
+  function snippetDone() {
+    R.chars += T.code.length;
+    R.typed += T.typed;
+    R.errors += T.errors;
+    R.snips += 1;
+    el.hudSnips.textContent = R.snips;
+
+    if (R.timed && remaining() > 0 && R.idx + 1 < R.playlist.length) {
+      R.idx += 1;
+      const next = R.playlist[R.idx];
+      paintSnipMeta(next.level, next.topic);
+      renderCode(next.code, S.lobby ? S.lobby.language : S.lang);
+      armRace();
+      sendProgress();
+      return;
+    }
+    finishRace();
+  }
+
+  /** The clock ran out. In a lobby the server has the last word. */
+  function timeUp() {
+    if (R.over) return;
+    R.over = true;
     stopRace();
-    paintHud(w, a, secs);
-    el.hint.textContent = "done — " + Math.round(w) + " wpm / " + Math.round(a) + "% accuracy";
+    el.codeBox.classList.add("locked");
+    const w = runWpm();
+    const a = runAccuracy();
+    paintHud(w, a, 0);
+    el.hint.textContent =
+      "time — " + R.snips + " snippet(s), " + liveChars() + " chars, " + Math.round(w) + " wpm";
+    if (S.solo) {
+      showTimedResult(w, a);
+      recordSolo(w, a, runSeconds());
+    } else {
+      send({ t: "progress", p: T.pos / Math.max(1, T.code.length), wpm: w, acc: a,
+             idx: R.idx, chars: liveChars(), snips: R.snips });
+    }
+  }
+
+  function finishRace() {
+    const timed = R.timed;
+    const secs = timed ? runSeconds() : elapsed();
+    const w = timed ? runWpm() : wpm();
+    const a = timed ? runAccuracy() : accuracy();
+    stopRace();
+    paintHud(w, a, timed ? remaining() : secs);
+    el.hint.textContent = timed
+      ? "playlist cleared — " + R.snips + " snippet(s) at " + Math.round(w) + " wpm"
+      : "done — " + Math.round(w) + " wpm / " + Math.round(a) + "% accuracy";
     el.codeBox.classList.add("locked");
     if (S.solo) {
-      showSoloResult(w, a, secs);
+      if (timed) showTimedResult(w, a);
+      else showSoloResult(w, a, secs);
       recordSolo(w, a, secs);
     } else {
-      send({ t: "finish", wpm: w, acc: a, time: secs });
+      send({
+        t: "finish",
+        wpm: w,
+        acc: a,
+        time: secs,
+        chars: liveChars(),
+        snips: R.snips,
+      });
       updateSelfBar(1);
     }
   }
@@ -351,6 +485,16 @@
     b.innerHTML = '<span class="chip-label"></span><span class="chip-n"></span>';
     b.querySelector(".chip-label").textContent = label;
     b.querySelector(".chip-n").textContent = count;
+    b.disabled = !enabled;
+    if (enabled) b.onclick = onClick;
+    return b;
+  }
+
+  function chipPlain(label, on, enabled, onClick) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "chip" + (on ? " on" : "") + (enabled ? "" : " off");
+    b.textContent = label;
     b.disabled = !enabled;
     if (enabled) b.onclick = onClick;
     return b;
@@ -450,6 +594,38 @@
         ? "filters are locked while a race is running"
         : "only the host can change the filters"
       : st.matches + " snippet(s) match — next race picks one of them";
+  }
+
+  function durationLabel(seconds) {
+    const row = DURATIONS.find((d) => d.v === seconds);
+    if (row) return row.label;
+    return seconds ? seconds + "s" : "One snippet";
+  }
+
+  function renderDurations() {
+    el.durationChips.innerHTML = "";
+    for (const d of DURATIONS) {
+      el.durationChips.appendChild(
+        chipPlain(d.label, S.duration === d.v, true, () => {
+          S.duration = d.v;
+          localStorage.setItem("cr_duration", String(d.v));
+          renderDurations();
+        })
+      );
+    }
+    el.durationHint.textContent = S.duration ? "timed" : "classic";
+  }
+
+  function renderRoomDurations(st) {
+    el.roomDurationChips.innerHTML = "";
+    const locked = st.host !== S.pid || st.state === "countdown" || st.state === "racing";
+    for (const d of DURATIONS) {
+      el.roomDurationChips.appendChild(
+        chipPlain(d.label, st.duration === d.v, !locked, () => {
+          send({ t: "duration", v: d.v });
+        })
+      );
+    }
   }
 
   function sendFilters(levels, topics) {
@@ -656,8 +832,16 @@
   }
 
   function sendProgress() {
-    if (S.solo || !T.running) return;
-    send({ t: "progress", p: T.pos / Math.max(1, T.code.length), wpm: wpm(), acc: accuracy() });
+    if (S.solo) return;
+    send({
+      t: "progress",
+      p: T.pos / Math.max(1, T.code.length),
+      wpm: R.timed ? runWpm() : wpm(),
+      acc: R.timed ? runAccuracy() : accuracy(),
+      idx: R.idx,
+      chars: liveChars(),
+      snips: R.snips,
+    });
   }
 
   function connect(code, create) {
@@ -670,6 +854,7 @@
       lang: S.lang,
       levels: S.levels.join(","),
       topics: S.topics.join(","),
+      duration: String(S.duration == null ? -1 : S.duration),
     });
     const ws = new WebSocket(proto + "//" + location.host + "/ws/" + code + "?" + qs);
     S.ws = ws;
@@ -710,7 +895,22 @@
         break;
       case "go":
         el.countdown.classList.add("hidden");
-        armRace();
+        if (S.lobby) {
+          initRun(S.lobby.duration > 0, S.lobby.playlist || []);
+          const first = R.playlist[0];
+          if (first) {
+            paintSnipMeta(first.level, first.topic);
+            renderCode(first.code, S.lobby.language);
+          }
+        }
+        armRace(
+          S.lobby && S.lobby.duration > 0
+            ? performance.now() + S.lobby.duration * 1000
+            : null
+        );
+        break;
+      case "time_up":
+        timeUp();
         break;
     }
   }
@@ -724,6 +924,7 @@
     el.stateBadge.className = "badge " + st.state;
     paintSnipMeta(st.level, st.topic);
     renderRoomFilters(st);
+    renderRoomDurations(st);
 
     const isHost = st.host === S.pid;
     const me = st.players.find((p) => p.id === S.pid);
@@ -735,8 +936,14 @@
       el.ready.classList.toggle("accent", !!me.ready);
     }
 
+    // A fresh race (or a filter change while waiting) resets the whole run.
+    const armed = st.state === "countdown" || st.state === "racing";
+    if (!armed && (!prev || prev.state !== st.state || prev.snippet !== st.snippet)) {
+      initRun(st.duration > 0, st.playlist || []);
+    }
+
     const snippetChanged = !prev || prev.snippet !== st.snippet || prev.language !== st.language;
-    if (snippetChanged) renderCode(st.snippet, st.language);
+    if (snippetChanged && !armed) renderCode(st.snippet, st.language);
 
     if (st.state === "waiting" || st.state === "finished") {
       stopRace();
@@ -749,7 +956,11 @@
         el.countdown.classList.add("hidden");
       }
     }
-    if (st.state === "racing" && !T.running && me && !me.finished) armRace();
+    if (st.state === "racing" && !T.running && !R.over && me && !me.finished) {
+      // ends_at is a unix time in seconds; the server ends the race either way.
+      const leftMs = st.ends_at ? st.ends_at * 1000 - Date.now() : 0;
+      armRace(st.duration > 0 ? performance.now() + Math.max(0, leftMs) : null);
+    }
 
     renderRacers(st);
     if (st.state === "finished") {
@@ -765,6 +976,9 @@
     p.progress = m.p;
     p.wpm = m.wpm;
     p.acc = m.acc;
+    if (m.chars != null) p.chars = m.chars;
+    if (m.snips != null) p.snips = m.snips;
+    if (m.idx != null) p.idx = m.idx;
     paintRacer(p);
   }
 
@@ -773,8 +987,10 @@
     const me = S.lobby.players.find((p) => p.id === S.pid);
     if (!me) return;
     me.progress = force != null ? force : T.pos / Math.max(1, T.code.length);
-    me.wpm = wpm();
-    me.acc = accuracy();
+    me.wpm = R.timed ? runWpm() : wpm();
+    me.acc = R.timed ? runAccuracy() : accuracy();
+    me.chars = liveChars();
+    me.snips = R.snips;
     paintRacer(me);
   }
 
@@ -822,17 +1038,28 @@
   }
 
   function renderResults(st) {
-    const rows = [...st.players].sort((a, b) => (a.place || 99) - (b.place || 99));
+    const timed = st.duration > 0;
+    const rows = [...st.players].sort((a, b) =>
+      timed ? (b.chars || 0) - (a.chars || 0) : (a.place || 99) - (b.place || 99)
+    );
+    const head = timed
+      ? "<tr><th>#</th><th>player</th><th>snippets</th><th>chars</th><th>wpm</th><th>acc</th></tr>"
+      : "<tr><th>#</th><th>player</th><th>wpm</th><th>acc</th><th>time</th></tr>";
     el.results.innerHTML =
-      "<h3>results</h3><table><tr><th>#</th><th>player</th><th>wpm</th><th>acc</th><th>time</th></tr>" +
+      "<h3>results" + (timed ? " · " + durationLabel(st.duration) : "") + "</h3><table>" +
+      head +
       rows
-        .map(
-          (p) =>
+        .map((p) => {
+          const cells = timed
+            ? "<td>" + (p.snips || 0) + "</td><td>" + (p.chars || 0) + "</td><td>" +
+              Math.round(p.wpm) + "</td><td>" + Math.round(p.acc) + "%</td>"
+            : "<td>" + Math.round(p.wpm) + "</td><td>" + Math.round(p.acc) + "%</td><td>" +
+              (p.time != null ? p.time.toFixed(1) + "s" : "-") + "</td>";
+          return (
             '<tr class="' + (p.id === S.pid ? "me" : "") + '"><td>' +
-            (p.place || "-") + "</td><td>" + escapeHtml(p.name) + "</td><td>" +
-            Math.round(p.wpm) + "</td><td>" + Math.round(p.acc) + "%</td><td>" +
-            (p.time != null ? p.time.toFixed(1) + "s" : "-") + "</td></tr>"
-        )
+            (p.place || "-") + "</td><td>" + escapeHtml(p.name) + "</td>" + cells + "</tr>"
+          );
+        })
         .join("") +
       "</table>";
     el.results.classList.remove("hidden");
@@ -843,6 +1070,17 @@
       "<h3>results</h3><table><tr><th>wpm</th><th>acc</th><th>time</th><th>errors</th></tr>" +
       '<tr class="me"><td>' + Math.round(w) + "</td><td>" + Math.round(a) + "%</td><td>" +
       secs.toFixed(1) + "s</td><td>" + T.errors + "</td></tr></table>";
+    el.results.classList.remove("hidden");
+    el.again.classList.remove("hidden");
+  }
+
+  function showTimedResult(w, a) {
+    el.results.innerHTML =
+      "<h3>results</h3><table>" +
+      "<tr><th>snippets</th><th>chars</th><th>wpm</th><th>acc</th><th>time</th></tr>" +
+      '<tr class="me"><td>' + R.snips + "</td><td>" + liveChars() + "</td><td>" +
+      Math.round(w) + "</td><td>" + Math.round(a) + "%</td><td>" +
+      (S.duration || Math.round(runSeconds())) + "s</td></tr></table>";
     el.results.classList.remove("hidden");
     el.again.classList.remove("hidden");
   }
@@ -897,6 +1135,7 @@
   }
 
   function showRoom() {
+    el.hudSnipsBox.classList.toggle("hidden", !R.timed);
     el.homeErr.textContent = "";
     el.home.classList.add("hidden");
     el.room.classList.remove("hidden");
@@ -921,14 +1160,32 @@
   }
 
   async function loadSoloSnippet() {
+    el.results.classList.add("hidden");
+    el.again.classList.remove("hidden");
+
+    if (S.duration > 0) {
+      const qs =
+        "lang=" + encodeURIComponent(S.lang) +
+        "&size=40" +
+        (filterQuery() ? "&" + filterQuery() : "");
+      const res = await fetch("/api/playlist?" + qs);
+      const data = await res.json();
+      initRun(true, data.playlist || []);
+      el.again.textContent = "Run again";
+      const first = R.playlist[0];
+      paintSnipMeta(first.level, first.topic);
+      renderCode(first.code, S.lang);
+      armRace(performance.now() + S.duration * 1000);
+      return;
+    }
+
     const qs =
       "lang=" + encodeURIComponent(S.lang) +
       "&avoid=" + encodeURIComponent(T.code) +
       (filterQuery() ? "&" + filterQuery() : "");
     const res = await fetch("/api/snippet?" + qs);
     const data = await res.json();
-    el.results.classList.add("hidden");
-    el.again.classList.remove("hidden");
+    initRun(false, []);
     el.again.textContent = "New snippet";
     paintSnipMeta(data.level, data.topic);
     renderCode(data.snippet, S.lang);
@@ -967,9 +1224,19 @@
       el.langSelect.appendChild(opt);
     }
     el.langSelect.value = S.lang;
+
+    // the stored choice wins; otherwise take the server default from cr_config
+    const stored = localStorage.getItem("cr_duration");
+    S.duration = stored != null ? parseInt(stored, 10) || 0 : (S.meta.race_seconds || 0);
+    if (!DURATIONS.some((d) => d.v === S.duration)) {
+      DURATIONS.push({ v: S.duration, label: S.duration + "s" });
+      DURATIONS.sort((a, b) => a.v - b.v);
+    }
+
     pruneTopics();
     saveFilters();
     renderFilters();
+    renderDurations();
   }
 
   function setLang(id) {
@@ -984,7 +1251,10 @@
 
   async function createLobby() {
     el.homeErr.textContent = "";
-    const qs = "lang=" + encodeURIComponent(S.lang) + (filterQuery() ? "&" + filterQuery() : "");
+    const qs =
+      "lang=" + encodeURIComponent(S.lang) +
+      "&duration=" + (S.duration || 0) +
+      (filterQuery() ? "&" + filterQuery() : "");
     const res = await fetch("/api/lobby/new?" + qs);
     const { code } = await res.json();
     S.solo = false;

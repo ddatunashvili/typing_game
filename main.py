@@ -26,20 +26,25 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 import db
+import library
+from library import (
+    catalog,
+    count_matching,
+    pick_snippet,
+    setting_int,
+)
 from snippets import (
     LANGUAGES,
     LEVEL_IDS,
-    SNIPPETS,
     TOPIC_IDS,
-    catalog,
     clean_ids,
-    count_matching,
     languages,
     levels,
     parse_ids,
-    pick_snippet,
     topics,
 )
+
+LANGUAGE_IDS = {lid for lid, _ in LANGUAGES}
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -66,6 +71,10 @@ def env_int(key: str, default: int) -> int:
 async def lifespan(_: FastAPI):
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "info").upper())
     await run_in_threadpool(db.setup)
+    # Push the seed snippets and default settings, then read them back.
+    await run_in_threadpool(library.seed)
+    await run_in_threadpool(library.refresh, True)
+    log.info("snippet library loaded from the %s", library.source())
     yield
     await run_in_threadpool(db.close)
 
@@ -75,9 +84,32 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-COUNTDOWN_SECONDS = env_int("COUNTDOWN_SECONDS", 5)
-CHAT_HISTORY = max(1, env_int("CHAT_HISTORY", 100))  # [:-0] would wipe the log
 LOBBY_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+MAX_RACE_SECONDS = 1800
+
+
+def countdown_seconds() -> int:
+    return max(0, min(30, setting_int("countdown_seconds", 5)))
+
+
+def chat_limit() -> int:
+    return max(1, setting_int("chat_history", 100))  # [:-0] would wipe the log
+
+
+def playlist_size() -> int:
+    return max(1, min(60, setting_int("playlist_size", 12)))
+
+
+def default_race_seconds() -> int:
+    return max(0, min(MAX_RACE_SECONDS, setting_int("race_seconds", 0)))
+
+
+def clean_duration(value) -> int:
+    """0 means classic: the race ends when the snippet is finished."""
+    try:
+        return max(0, min(MAX_RACE_SECONDS, int(float(value))))
+    except (TypeError, ValueError):
+        return 0
 
 COOKIE_NAME = "cr_token"
 COOKIE_MAX_AGE = 60 * 60 * 24 * 730  # two years
@@ -132,6 +164,9 @@ class Player:
         self.avatar = 0  # avatar version; 0 means no image
         self.ip = ""
         self.ready = False
+        self.idx = 0  # index into the timed-mode playlist
+        self.chars = 0  # correct characters typed across the whole race
+        self.snips = 0  # snippets completed
         self.progress = 0.0
         self.wpm = 0.0
         self.acc = 100.0
@@ -141,6 +176,9 @@ class Player:
 
     def reset(self) -> None:
         self.ready = False
+        self.idx = 0
+        self.chars = 0
+        self.snips = 0
         self.progress = 0.0
         self.wpm = 0.0
         self.acc = 100.0
@@ -155,6 +193,9 @@ class Player:
             "avatar": self.avatar,
             "name": self.name,
             "ready": self.ready,
+            "idx": self.idx,
+            "chars": self.chars,
+            "snips": self.snips,
             "progress": round(self.progress, 4),
             "wpm": round(self.wpm, 1),
             "acc": round(self.acc, 1),
@@ -171,12 +212,21 @@ class Lobby:
         language: str = "python",
         levels_filter: Optional[List[str]] = None,
         topics_filter: Optional[List[str]] = None,
+        duration: Optional[int] = None,
     ):
         self.code = code
-        self.language = language if language in SNIPPETS else "python"
+        self.language = language if language in LANGUAGE_IDS else "python"
         self.levels: List[str] = clean_ids(levels_filter, LEVEL_IDS)
         self.topics: List[str] = clean_ids(topics_filter, TOPIC_IDS)
-        self.snip = pick_snippet(self.language, "", self.levels, self.topics)
+        # 0 = classic (one snippet), >0 = timed run through a playlist
+        self.duration = clean_duration(
+            default_race_seconds() if duration is None else duration
+        )
+        self.timer: Optional[asyncio.Task] = None
+        self.ends_at: float = 0.0
+        self.snip: dict = {}
+        self.playlist: List[dict] = []
+        self.reroll()  # fills snip + playlist to match the mode
         self.players: Dict[str, Player] = {}
         self.order: List[str] = []
         self.host: Optional[str] = None
@@ -190,7 +240,15 @@ class Lobby:
         return [self.players[pid] for pid in self.order if pid in self.players]
 
     def reroll(self, avoid: str = "") -> None:
-        self.snip = pick_snippet(self.language, avoid, self.levels, self.topics)
+        """Pick what the next race will use: one snippet, or a whole playlist."""
+        if self.duration > 0:
+            self.playlist = library.playlist(
+                self.language, playlist_size(), self.levels, self.topics
+            )
+            self.snip = self.playlist[0]
+        else:
+            self.snip = pick_snippet(self.language, avoid, self.levels, self.topics)
+            self.playlist = [self.snip]
 
     def snapshot(self) -> dict:
         return {
@@ -205,6 +263,12 @@ class Lobby:
             "level": self.snip["level"],
             "topic": self.snip["topic"],
             "matches": count_matching(self.language, self.levels, self.topics),
+            "duration": self.duration,
+            "ends_at": self.ends_at,
+            "playlist": [
+                {"code": s["code"], "level": s["level"], "topic": s["topic"]}
+                for s in self.playlist
+            ],
             "start_ts": self.start_ts,
             "players": [p.public() for p in self.roster()],
         }
@@ -228,13 +292,17 @@ class Lobby:
     async def system(self, text: str) -> None:
         msg = {"t": "chat", "name": None, "text": text, "sys": True, "ts": time.time()}
         self.chat.append(msg)
-        del self.chat[: -CHAT_HISTORY]
+        del self.chat[: -chat_limit()]
         await self.broadcast(msg)
 
     def cancel_task(self) -> None:
         if self.task and not self.task.done():
             self.task.cancel()
         self.task = None
+        if self.timer and not self.timer.done():
+            self.timer.cancel()
+        self.timer = None
+        self.ends_at = 0.0
 
     async def start_race(self) -> None:
         if self.state in ("countdown", "racing"):
@@ -250,15 +318,63 @@ class Lobby:
 
     async def _countdown(self) -> None:
         try:
-            for n in range(COUNTDOWN_SECONDS, 0, -1):
+            for n in range(countdown_seconds(), 0, -1):
                 await self.broadcast({"t": "countdown", "n": n})
                 await asyncio.sleep(1)
             self.state = "racing"
             self.start_ts = time.time()
-            await self.broadcast({"t": "go", "start_ts": self.start_ts})
+            if self.duration > 0:
+                self.ends_at = self.start_ts + self.duration
+                self.timer = asyncio.create_task(self._clock())
+            await self.broadcast(
+                {"t": "go", "start_ts": self.start_ts, "ends_at": self.ends_at}
+            )
             await self.push_state()
         except asyncio.CancelledError:
             pass
+
+    async def _clock(self) -> None:
+        """Timed mode: the server ends the race, so every racer stops together."""
+        try:
+            await asyncio.sleep(max(0.0, self.ends_at - time.time()))
+            if self.state != "racing":
+                return
+            await self.finish_timed()
+        except asyncio.CancelledError:
+            pass
+
+    async def finish_timed(self) -> None:
+        """Rank by characters typed, then accuracy, and close the race."""
+        racers = [p for p in self.roster()]
+        ranked = sorted(racers, key=lambda p: (-p.chars, -p.acc))
+        for i, player in enumerate(ranked, start=1):
+            player.finished = True
+            if player.place is None:
+                player.place = i
+            if player.time is None:
+                player.time = float(self.duration)
+        self.state = "finished"
+        self.ends_at = 0.0
+        await self.broadcast({"t": "time_up"})
+        await self.push_state()
+        for player in ranked:
+            if player.uid and db.enabled():
+                try:
+                    await run_in_threadpool(
+                        db.record_race,
+                        player.uid,
+                        self.language,
+                        "mixed" if len(self.playlist) > 1 else self.snip["level"],
+                        "mixed" if len(self.playlist) > 1 else self.snip["topic"],
+                        player.wpm,
+                        player.acc,
+                        float(self.duration),
+                        player.place,
+                        self.code,
+                        player.ip,
+                    )
+                except Exception as exc:
+                    log.warning("could not record timed race: %s", exc)
 
     async def reset_to_lobby(self) -> None:
         self.cancel_task()
@@ -271,9 +387,17 @@ class Lobby:
 
     async def maybe_finish(self) -> None:
         racers = self.roster()
-        if self.state == "racing" and racers and all(p.finished for p in racers):
-            self.state = "finished"
-            await self.push_state()
+        if self.state != "racing" or not racers:
+            return
+        if not all(p.finished for p in racers):
+            return
+        # Timed mode: everyone exhausted the playlist before the clock ran out.
+        if self.duration > 0:
+            self.cancel_task()
+            await self.finish_timed()
+            return
+        self.state = "finished"
+        await self.push_state()
 
 
 lobbies: Dict[str, Lobby] = {}
@@ -294,6 +418,9 @@ async def api_meta():
         "topics": topics(),
         "catalog": catalog(),
         "accounts": db.enabled(),
+        "settings": library.settings(),
+        "race_seconds": default_race_seconds(),
+        "source": library.source(),
     }
 
 
@@ -316,15 +443,52 @@ async def api_snippet(
     }
 
 
+@app.get("/api/playlist")
+async def api_playlist(
+    lang: str = "python",
+    size: int = 12,
+    levels: str = "",
+    topics: str = "",
+):
+    """An ordered run of snippets, for a timed solo session."""
+    wanted_levels = parse_ids(levels, LEVEL_IDS)
+    wanted_topics = parse_ids(topics, TOPIC_IDS)
+    run = library.playlist(lang, size, wanted_levels, wanted_topics)
+    return {
+        "language": lang,
+        "matches": count_matching(lang, wanted_levels, wanted_topics),
+        "playlist": [
+            {"code": s["code"], "level": s["level"], "topic": s["topic"]} for s in run
+        ],
+    }
+
+
+@app.get("/api/config")
+async def api_config():
+    """Effective settings, and where the snippet library is being read from."""
+    return {
+        "settings": library.settings(),
+        "source": library.source(),
+        "snippets": sum(len(v) for v in library.all_snippets().values()),
+        "stored_in_db": db.enabled(),
+    }
+
+
 # ---------- lobbies ----------
 @app.get("/api/lobby/new")
-async def api_new_lobby(lang: str = "python", levels: str = "", topics: str = ""):
+async def api_new_lobby(
+    lang: str = "python",
+    levels: str = "",
+    topics: str = "",
+    duration: int = -1,
+):
     code = new_code()
     lobbies[code] = Lobby(
         code,
         lang,
         parse_ids(levels, LEVEL_IDS),
         parse_ids(topics, TOPIC_IDS),
+        None if duration < 0 else duration,
     )
     return {"code": code}
 
@@ -490,6 +654,7 @@ async def ws_lobby(
     lang: str = Query("python"),
     levels: str = Query(""),
     topics: str = Query(""),
+    duration: int = Query(-1),
 ):
     code = code.upper()
     await websocket.accept()
@@ -500,7 +665,13 @@ async def ws_lobby(
             await websocket.send_text(json.dumps({"t": "error", "code": "no_lobby"}))
             await websocket.close()
             return
-        lobby = Lobby(code, lang, parse_ids(levels, LEVEL_IDS), parse_ids(topics, TOPIC_IDS))
+        lobby = Lobby(
+            code,
+            lang,
+            parse_ids(levels, LEVEL_IDS),
+            parse_ids(topics, TOPIC_IDS),
+            None if duration < 0 else duration,
+        )
         lobbies[code] = lobby
 
     pid = pid or uuid.uuid4().hex[:12]
@@ -567,7 +738,7 @@ async def ws_lobby(
                     "ts": time.time(),
                 }
                 lobby.chat.append(out)
-                del lobby.chat[: -CHAT_HISTORY]
+                del lobby.chat[: -chat_limit()]
                 await lobby.broadcast(out)
 
             elif kind == "ready":
@@ -585,7 +756,7 @@ async def ws_lobby(
                 if pid != lobby.host or lobby.state in ("countdown", "racing"):
                     continue
                 value = str(msg.get("v", "python"))
-                if value in SNIPPETS:
+                if value in LANGUAGE_IDS:
                     lobby.language = value
                     lobby.reroll()
                     await lobby.push_state()
@@ -606,6 +777,17 @@ async def ws_lobby(
                     )
                 )
 
+            elif kind == "duration":
+                if pid != lobby.host or lobby.state in ("countdown", "racing"):
+                    continue
+                lobby.duration = clean_duration(msg.get("v", 0))
+                lobby.reroll()
+                await lobby.push_state()
+                await lobby.system(
+                    "race time: %s"
+                    % ("%ds" % lobby.duration if lobby.duration else "one snippet")
+                )
+
             elif kind == "start":
                 if pid == lobby.host:
                     await lobby.start_race()
@@ -620,6 +802,9 @@ async def ws_lobby(
                 player.progress = max(0.0, min(1.0, float(msg.get("p", 0))))
                 player.wpm = max(0.0, float(msg.get("wpm", 0)))
                 player.acc = max(0.0, min(100.0, float(msg.get("acc", 100))))
+                player.idx = max(0, min(len(lobby.playlist) - 1, int(msg.get("idx", 0))))
+                player.chars = max(0, min(2_000_000, int(msg.get("chars", 0))))
+                player.snips = max(0, min(len(lobby.playlist), int(msg.get("snips", 0))))
                 await lobby.broadcast(
                     {
                         "t": "prog",
@@ -627,6 +812,9 @@ async def ws_lobby(
                         "p": round(player.progress, 4),
                         "wpm": round(player.wpm, 1),
                         "acc": round(player.acc, 1),
+                        "idx": player.idx,
+                        "chars": player.chars,
+                        "snips": player.snips,
                     },
                     skip=pid,
                 )
@@ -639,8 +827,19 @@ async def ws_lobby(
                 player.wpm = max(0.0, min(400.0, float(msg.get("wpm", 0))))
                 player.acc = max(0.0, min(100.0, float(msg.get("acc", 100))))
                 player.time = max(0.0, float(msg.get("time", 0)))
+                player.chars = max(0, min(2_000_000, int(msg.get("chars", player.chars))))
+                player.snips = max(0, min(len(lobby.playlist), int(msg.get("snips", player.snips))))
                 lobby.finish_count += 1
                 player.place = lobby.finish_count
+                if lobby.duration > 0:
+                    # The clock still decides the race; this racer just ran out of
+                    # playlist. Skip the per-snippet bookkeeping below.
+                    await lobby.system(
+                        "%s cleared all %d snippets" % (player.name, player.snips)
+                    )
+                    await lobby.push_state()
+                    await lobby.maybe_finish()
+                    continue
                 if player.uid and db.enabled():
                     try:
                         await run_in_threadpool(
@@ -685,7 +884,13 @@ async def ws_lobby(
 
 @app.get("/healthz")
 async def healthz():
-    return {"ok": True, "lobbies": len(lobbies), "db": db.enabled()}
+    return {
+        "ok": True,
+        "lobbies": len(lobbies),
+        "db": db.enabled(),
+        "snippets": sum(len(v) for v in library.all_snippets().values()),
+        "library": library.source(),
+    }
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

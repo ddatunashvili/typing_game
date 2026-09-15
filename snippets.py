@@ -1,5 +1,4 @@
 """Code snippets used as typing prompts, tagged by language, level and topic."""
-import random
 from typing import Dict, Iterable, List, Optional, Sequence
 
 LANGUAGES = [
@@ -22,6 +21,7 @@ LANGUAGES = [
 
 # Level is about typing load: symbol density, nesting and length.
 LEVELS = [
+    ("very-easy", "Really easy"),
     ("easy", "Easy"),
     ("medium", "Medium"),
     ("hard", "Hard"),
@@ -61,6 +61,14 @@ def snip(level: str, topic: str, code: str) -> dict:
 
 SNIPPETS: Dict[str, List[dict]] = {
     "python": [
+        snip("very-easy", "strings", r'''
+def greet(name):
+    return "hello " + name
+'''),
+        snip("very-easy", "math", r'''
+def square(n):
+    return n * n
+'''),
         snip("easy", "strings", r'''
 def word_count(text):
     counts = {}
@@ -158,6 +166,16 @@ def top_revenue(orders, tag, limit=5):
 '''),
     ],
     "javascript": [
+        snip("very-easy", "math", r'''
+const double = (n) => n * 2;
+
+const half = (n) => n / 2;
+'''),
+        snip("very-easy", "strings", r'''
+function greet(name) {
+  return `hello ${name}`;
+}
+'''),
         snip("easy", "functional", r'''
 const unique = (items) => [...new Set(items)];
 
@@ -248,6 +266,11 @@ class EventBus {
 '''),
     ],
     "typescript": [
+        snip("very-easy", "math", r'''
+export function add(a: number, b: number): number {
+  return a + b;
+}
+'''),
         snip("easy", "oop", r'''
 interface User {
   id: number;
@@ -335,6 +358,16 @@ export async function getJson<T>(url: string, init?: RequestInit): Promise<T> {
 '''),
     ],
     "go": [
+        snip("very-easy", "math", r'''
+func Add(a int, b int) int {
+	return a + b
+}
+'''),
+        snip("very-easy", "strings", r'''
+func Greet(name string) string {
+	return "hello " + name
+}
+'''),
         snip("easy", "algorithms", r'''
 func Sum(nums []int) int {
 	total := 0
@@ -449,6 +482,11 @@ func (s *Store) Put(key string, value []byte) {
 '''),
     ],
     "rust": [
+        snip("very-easy", "math", r'''
+fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+'''),
         snip("easy", "math", r'''
 fn gcd(mut a: u64, mut b: u64) -> u64 {
     while b != 0 {
@@ -548,6 +586,11 @@ impl<T> Stack<T> {
 '''),
     ],
     "java": [
+        snip("very-easy", "math", r'''
+public static int add(int a, int b) {
+    return a + b;
+}
+'''),
         snip("easy", "math", r'''
 public class Fib {
     public static long fib(int n) {
@@ -628,6 +671,16 @@ public List<Report> buildAll(List<String> ids) throws Exception {
 '''),
     ],
     "c": [
+        snip("very-easy", "math", r'''
+int add(int a, int b) {
+    return a + b;
+}
+'''),
+        snip("very-easy", "strings", r'''
+void hello(void) {
+    printf("hello world");
+}
+'''),
         snip("easy", "math", r'''
 int gcd(int a, int b) {
     while (b != 0) {
@@ -724,6 +777,11 @@ int read_file(const char *path, char **out, size_t *len) {
 '''),
     ],
     "cpp": [
+        snip("very-easy", "math", r'''
+int add(int a, int b) {
+    return a + b;
+}
+'''),
         snip("easy", "algorithms", r'''
 int sum(const std::vector<int> &nums) {
     return std::accumulate(nums.begin(), nums.end(), 0);
@@ -816,6 +874,12 @@ private:
 '''),
     ],
     "csharp": [
+        snip("very-easy", "math", r'''
+public static int Add(int a, int b)
+{
+    return a + b;
+}
+'''),
         snip("easy", "functional", r'''
 public static IEnumerable<string> ActiveNames(IEnumerable<User> users)
 {
@@ -905,6 +969,14 @@ public sealed class RingBuffer<T>
 '''),
     ],
     "php": [
+        snip("very-easy", "strings", r'''
+<?php
+
+function greet(string $name): string
+{
+    return "hello " . $name;
+}
+'''),
         snip("easy", "strings", r'''
 <?php
 
@@ -999,6 +1071,11 @@ final class Collection implements Countable
 '''),
     ],
     "ruby": [
+        snip("very-easy", "strings", r'''
+def greet(name)
+  "hello #{name}"
+end
+'''),
         snip("easy", "strings", r'''
 def titleize(text)
   text.split.map(&:capitalize).join(" ")
@@ -1076,6 +1153,15 @@ end
 '''),
     ],
     "sql": [
+        snip("very-easy", "data", r'''
+SELECT id, name
+FROM users;
+'''),
+        snip("very-easy", "data", r'''
+SELECT COUNT(*)
+FROM orders
+WHERE paid = true;
+'''),
         snip("easy", "data", r'''
 SELECT id, name, email
 FROM users
@@ -1137,6 +1223,12 @@ CREATE INDEX CONCURRENTLY idx_races_finished_at ON races (finished_at DESC);
 '''),
     ],
     "css": [
+        snip("very-easy", "ui", r'''
+body {
+  margin: 0;
+  color: #eee;
+}
+'''),
         snip("easy", "ui", r'''
 .btn {
   padding: 10px 18px;
@@ -1228,6 +1320,10 @@ CREATE INDEX CONCURRENTLY idx_races_finished_at ON races (finished_at DESC);
 '''),
     ],
     "markup": [
+        snip("very-easy", "ui", r'''
+<h1>Hello</h1>
+<p>Type this line.</p>
+'''),
         snip("easy", "ui", r'''
 <section class="hero">
   <h1 class="title">Race your friends</h1>
@@ -1302,6 +1398,11 @@ CREATE INDEX CONCURRENTLY idx_races_finished_at ON races (finished_at DESC);
 '''),
     ],
     "bash": [
+        snip("very-easy", "devops", r'''
+#!/usr/bin/env bash
+
+echo "hello world"
+'''),
         snip("easy", "devops", r'''
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1416,81 +1517,3 @@ def clean_ids(values: Optional[Iterable[str]], allowed: Sequence[str]) -> List[s
 def parse_ids(raw: str, allowed: Sequence[str]) -> List[str]:
     """Parse a comma-separated query-string list of ids."""
     return clean_ids((raw or "").split(","), allowed)
-
-
-def pool_for(
-    language: str,
-    levels_filter: Optional[Iterable[str]] = None,
-    topics_filter: Optional[Iterable[str]] = None,
-) -> List[dict]:
-    """Snippets matching the filters, falling back to the whole language."""
-    pool = SNIPPETS.get(language) or SNIPPETS["python"]
-    wanted_levels = set(clean_ids(levels_filter, LEVEL_IDS))
-    wanted_topics = set(clean_ids(topics_filter, TOPIC_IDS))
-    matches = [
-        s
-        for s in pool
-        if (not wanted_levels or s["level"] in wanted_levels)
-        and (not wanted_topics or s["topic"] in wanted_topics)
-    ]
-    return matches or pool
-
-
-def pick_snippet(
-    language: str,
-    avoid: str = "",
-    levels_filter: Optional[Iterable[str]] = None,
-    topics_filter: Optional[Iterable[str]] = None,
-) -> dict:
-    """A random snippet dict: {code, level, topic}."""
-    pool = pool_for(language, levels_filter, topics_filter)
-    options = [s for s in pool if s["code"] != avoid] or pool
-    return random.choice(options)
-
-
-def random_snippet(language: str, avoid: str = "") -> str:
-    """Backwards-compatible helper returning just the code."""
-    return pick_snippet(language, avoid)["code"]
-
-
-def catalog() -> List[dict]:
-    """Per-language counts by level and topic, so the UI can disable empty picks."""
-    out = []
-    for lid, label in LANGUAGES:
-        pool = SNIPPETS.get(lid, [])
-        by_level = {level: 0 for level in LEVEL_IDS}
-        by_topic = {topic: 0 for topic in TOPIC_IDS}
-        combos: Dict[str, int] = {}
-        for s in pool:
-            by_level[s["level"]] += 1
-            by_topic[s["topic"]] += 1
-            key = s["level"] + "|" + s["topic"]
-            combos[key] = combos.get(key, 0) + 1
-        out.append(
-            {
-                "id": lid,
-                "label": label,
-                "total": len(pool),
-                "levels": by_level,
-                "topics": {t: n for t, n in by_topic.items() if n},
-                "combos": combos,
-            }
-        )
-    return out
-
-
-def count_matching(
-    language: str,
-    levels_filter: Optional[Iterable[str]] = None,
-    topics_filter: Optional[Iterable[str]] = None,
-) -> int:
-    """How many snippets actually match — 0 means the filters fell back."""
-    pool = SNIPPETS.get(language) or []
-    wanted_levels = set(clean_ids(levels_filter, LEVEL_IDS))
-    wanted_topics = set(clean_ids(topics_filter, TOPIC_IDS))
-    return sum(
-        1
-        for s in pool
-        if (not wanted_levels or s["level"] in wanted_levels)
-        and (not wanted_topics or s["topic"] in wanted_topics)
-    )

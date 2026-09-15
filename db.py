@@ -182,6 +182,31 @@ SCHEMA = (
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """
+    CREATE TABLE IF NOT EXISTS cr_snippets (
+        id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+        language VARCHAR(20) NOT NULL,
+        level VARCHAR(10) NOT NULL,
+        topic VARCHAR(24) NOT NULL,
+        code MEDIUMTEXT NOT NULL,
+        code_hash CHAR(64) NOT NULL,
+        active TINYINT(1) NOT NULL DEFAULT 1,
+        source VARCHAR(16) NOT NULL DEFAULT 'seed',
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY uniq_cr_snippet_hash (code_hash),
+        KEY idx_cr_snippet_pick (language, level, topic, active)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS cr_config (
+        name VARCHAR(40) NOT NULL,
+        value VARCHAR(255) NOT NULL,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
     CREATE TABLE IF NOT EXISTS cr_races (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
         user_id INT UNSIGNED NOT NULL,
@@ -428,3 +453,117 @@ def leaderboard(limit: int = 10) -> List[dict]:
         (max(1, min(50, limit)),),
     )
     return [public_user(row) for row in rows]
+
+
+# ---------- snippet library ----------
+def code_hash(language: str, code: str) -> str:
+    """Identity of a snippet: the same code under two languages is two rows."""
+    parts = (language.encode("utf-8"), code.encode("utf-8"))
+    return hashlib.sha256(b"".join(parts)).hexdigest()
+
+
+def seed_snippets(by_language: Dict[str, List[dict]]) -> int:
+    """Insert any seed snippet the table does not have yet. Idempotent."""
+    if not _ready:
+        return 0
+    rows = []
+    for language, pool in by_language.items():
+        for item in pool:
+            rows.append(
+                (
+                    language[:20],
+                    item["level"][:10],
+                    item["topic"][:24],
+                    item["code"],
+                    code_hash(language, item["code"]),
+                )
+            )
+    if not rows:
+        return 0
+    with _Borrowed() as conn:
+        with conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT IGNORE INTO cr_snippets
+                    (language, level, topic, code, code_hash, source)
+                VALUES (%s, %s, %s, %s, %s, 'seed')
+                """,
+                rows,
+            )
+            return cur.rowcount or 0
+
+
+def load_snippets() -> Dict[str, List[dict]]:
+    """The whole active library, grouped by language."""
+    out: Dict[str, List[dict]] = {}
+    for row in _query(
+        """
+        SELECT id, language, level, topic, code
+        FROM cr_snippets
+        WHERE active = 1
+        ORDER BY language, level, id
+        """
+    ):
+        out.setdefault(row["language"], []).append(
+            {
+                "id": int(row["id"]),
+                "level": row["level"],
+                "topic": row["topic"],
+                "code": row["code"],
+            }
+        )
+    return out
+
+
+def add_snippet(language: str, level: str, topic: str, code: str) -> bool:
+    """Add one snippet. False means an identical one already exists."""
+    changed = _exec(
+        """
+        INSERT IGNORE INTO cr_snippets
+            (language, level, topic, code, code_hash, source)
+        VALUES (%s, %s, %s, %s, %s, 'api')
+        """,
+        (language[:20], level[:10], topic[:24], code, code_hash(language, code)),
+    )
+    return bool(changed)
+
+
+def set_snippet_active(snippet_id: int, active: bool) -> None:
+    _exec(
+        "UPDATE cr_snippets SET active = %s WHERE id = %s",
+        (1 if active else 0, snippet_id),
+    )
+
+
+def snippet_count() -> int:
+    row = _one("SELECT COUNT(*) AS n FROM cr_snippets WHERE active = 1")
+    return int((row or {}).get("n") or 0)
+
+
+# ---------- settings ----------
+def seed_config(defaults: Dict[str, str]) -> int:
+    """Write the env-derived defaults once, so the table is editable afterwards."""
+    if not _ready or not defaults:
+        return 0
+    rows = [(name, str(value)) for name, value in defaults.items()]
+    with _Borrowed() as conn:
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT IGNORE INTO cr_config (name, value) VALUES (%s, %s)",
+                rows,
+            )
+            return cur.rowcount or 0
+
+
+def load_config() -> Dict[str, str]:
+    return {row["name"]: row["value"] for row in _query("SELECT name, value FROM cr_config")}
+
+
+def set_config(name: str, value: str) -> None:
+    _exec(
+        """
+        INSERT INTO cr_config (name, value) VALUES (%s, %s)
+        ON DUPLICATE KEY UPDATE value = VALUES(value)
+        """,
+        (name[:40], str(value)[:255]),
+    )

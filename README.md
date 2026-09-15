@@ -25,8 +25,9 @@ Open http://127.0.0.1:8000
 
 Every snippet is tagged with one level and one topic, so you can narrow what you get.
 
-- **Levels:** `easy`, `medium`, `hard` — graded by typing load (symbol density, nesting, length).
-  All 15 languages have snippets at all three levels.
+- **Levels:** `very-easy` ("Really easy"), `easy`, `medium`, `hard` — graded by typing load
+  (symbol density, nesting, length). All 15 languages have snippets at every level, and each
+  level has at least 20 snippets across the languages (117 in total).
 - **Topics:** `algorithms`, `data-structures`, `strings`, `math`, `async`, `web`, `oop`,
   `functional`, `errors`, `data`, `ui`, `devops`.
 - Picking nothing means *any*. Picking several is a union — `easy` + `hard` gives both.
@@ -36,6 +37,20 @@ Every snippet is tagged with one level and one topic, so you can narrow what you
   that language rather than leaving you with an empty screen.
 - In a lobby the **filters** button opens the same picker; only the host can change it, and
   it locks while a race is running.
+
+## Race time
+
+A race is either **classic** (one snippet, ends when you finish it) or **timed**.
+
+- Pick the length on the home screen: one snippet, 30s, 1 min, 2 min or 5 min.
+- In timed mode every racer works through the same shuffled **playlist**, so it stays fair.
+  Finish a snippet while the clock is still running and the next one appears immediately.
+- Ranking is by **characters typed**, then accuracy — not by who finished first.
+- The server owns the clock: it ends the race and ranks everyone, so a tampered or lagging
+  client cannot keep typing past the buzzer.
+- The host can switch the length from the lobby's **filters** tray; it locks during a race.
+- `playlist_size` (default 12) sets how many snippets a lobby playlist holds; solo timed runs
+  request 40. The pool is reshuffled and repeated when it is smaller than that.
 
 ## Profiles
 
@@ -64,8 +79,9 @@ when no database is configured.
 | file | role |
 | --- | --- |
 | `main.py` | FastAPI app, lobby state machine, `/ws/{code}` websocket, REST API |
-| `snippets.py` | snippet library, tagged by language / level / topic |
-| `db.py` | MySQL: players, IP log, avatars, race history (optional) |
+| `snippets.py` | seed snippet library, tagged by language / level / topic |
+| `library.py` | reads snippets and settings from MySQL, falls back to the seed file |
+| `db.py` | MySQL: players, IP log, avatars, race history, snippets, settings |
 | `static/app.js` | typing engine, per-char highlighting, filters, profile, lobby client |
 | `static/style.css` | dark theme |
 | `static/index.html` | markup + Prism component loading |
@@ -78,7 +94,9 @@ Catalog and snippets:
 - `GET /api/meta` — languages, levels, topics and per-language counts (incl. level×topic)
 - `GET /api/languages` — language list
 - `GET /api/snippet?lang=python&levels=easy,hard&topics=math` — random snippet + its tags
-- `GET /api/lobby/new?lang=python&levels=&topics=` — create lobby, returns code
+- `GET /api/playlist?lang=python&size=12&levels=&topics=` — an ordered run, for timed solo
+- `GET /api/config` — effective settings and where the library is being read from
+- `GET /api/lobby/new?lang=python&levels=&topics=&duration=60` — create lobby, returns code
 - `GET /api/lobby/{code}` — lobby snapshot
 - `GET /healthz` — liveness, lobby count, database state
 
@@ -93,12 +111,44 @@ Accounts (all no-ops when no database is configured):
 - `GET /api/leaderboard?limit=10` — best WPM
 - `POST /api/race` — record a solo result (lobby races are recorded server-side)
 
-Websocket `WS /ws/{code}?name=&pid=&create=0|1&lang=&levels=&topics=`
+Websocket `WS /ws/{code}?name=&pid=&create=0|1&lang=&levels=&topics=&duration=`
 
-Client → server: `chat`, `ready`, `start`, `again`, `lang`, `filters`, `progress`, `finish`
-Server → client: `hello`, `state`, `chat`, `countdown`, `go`, `prog`, `error`
+Client → server: `chat`, `ready`, `start`, `again`, `lang`, `filters`, `duration`,
+`progress`, `finish`
+Server → client: `hello`, `state`, `chat`, `countdown`, `go`, `prog`, `time_up`, `error`
 
-## Add snippets
+## Where the snippets live
+
+The snippets and the tunable settings are stored in MySQL, in `cr_snippets` and `cr_config`.
+
+- `snippets.py` is the **seed**. On every start it is pushed into `cr_snippets` with
+  `INSERT IGNORE` keyed by a content hash, so restarts never duplicate rows and hand-edits
+  are never overwritten.
+- The running server re-reads both tables every `LIBRARY_REFRESH_SECONDS` (default 60), so
+  SQL edits take effect without a restart or a redeploy.
+- With no database configured the seed file is used directly; `GET /api/config` reports which
+  source is live.
+
+Add or retire a snippet without touching the code:
+
+```sql
+INSERT INTO cr_snippets (language, level, topic, code, code_hash)
+VALUES ('python', 'very-easy', 'math', 'x = 1 + 1', SHA2(CONCAT('python', CHAR(31), 'x = 1 + 1'), 256));
+
+UPDATE cr_snippets SET active = 0 WHERE id = 42;   -- retire one
+```
+
+Change a setting the same way (`countdown_seconds`, `chat_history`, `race_seconds`,
+`playlist_size`):
+
+```sql
+UPDATE cr_config SET value = '60' WHERE name = 'race_seconds';
+```
+
+`cr_config` is seeded from the matching environment variable on first start, so `.env` still
+sets the initial values; afterwards the table wins.
+
+## Add snippets to the seed
 
 Append a `snip(level, topic, code)` entry to the matching list in `snippets.py`:
 
@@ -160,9 +210,12 @@ production so the panel's injected value wins.
 | `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` | unset | accounts, avatars and race history |
 | `DATABASE_URL` | unset | alternative to the five `MYSQL_*` vars; a `jdbc:` prefix and percent-encoded passwords are accepted |
 | `MYSQL_CONNECT_TIMEOUT` | `8` | seconds before giving up on the database |
+| `LIBRARY_REFRESH_SECONDS` | `60` | how often the snippet library and settings are re-read |
+| `COUNTDOWN_SECONDS` / `CHAT_HISTORY` / `RACE_SECONDS` / `PLAYLIST_SIZE` | see above | seed values for `cr_config` on first start |
 
-Leave the database vars unset to run with accounts disabled. Tables (`cr_users`,
-`cr_user_ips`, `cr_races`) are created automatically on first start. If the database is
+Leave the database vars unset to run with accounts disabled and the seed snippets in use.
+Tables (`cr_users`, `cr_user_ips`, `cr_races`, `cr_snippets`, `cr_config`) are created
+automatically on first start. If the database is
 unreachable the app logs a warning and serves the game without accounts rather than failing.
 
 ### Reverse proxy
