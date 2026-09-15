@@ -30,10 +30,32 @@ Every snippet is tagged with one level and one topic, so you can narrow what you
 
 - **Levels:** `very-easy` ("Really easy"), `easy`, `medium`, `hard` — graded by typing load
   (symbol density, nesting, length). All 15 languages have snippets at every level.
-- Target is **20 snippets per level per language** (1,200). Python is complete at 80;
-  the rest still run on the original seed set, so the library is 187 today. New languages go
-  in `packs/<language>.py` as `(level, topic, code, output)` tuples and are merged
-  automatically, skipping anything already present.
+- **20+ snippets per level per language** across all 15 languages - **1,253 in total**,
+  96% of them with a demo transcript for the run panel. Every language has its own
+  `packs/<language>.py` holding `(level, topic, code, output)` tuples, merged automatically
+  and skipping anything already present.
+
+| language | really easy | easy | medium | hard | total |
+| --- | --- | --- | --- | --- | --- |
+| Python | 20 | 20 | 20 | 20 | 80 |
+| JavaScript | 22 | 23 | 20 | 22 | 87 |
+| TypeScript | 20 | 20 | 23 | 22 | 85 |
+| Go | 22 | 21 | 21 | 22 | 86 |
+| Rust | 20 | 21 | 21 | 22 | 84 |
+| Java | 20 | 20 | 21 | 21 | 82 |
+| C | 20 | 21 | 21 | 21 | 83 |
+| C++ | 20 | 21 | 20 | 21 | 82 |
+| C# | 20 | 21 | 21 | 22 | 84 |
+| PHP | 20 | 21 | 21 | 22 | 84 |
+| Ruby | 20 | 21 | 21 | 21 | 83 |
+| SQL | 20 | 21 | 21 | 21 | 83 |
+| CSS | 20 | 21 | 20 | 22 | 83 |
+| HTML | 20 | 21 | 22 | 22 | 85 |
+| Bash | 20 | 20 | 20 | 22 | 82 |
+
+Where a real parser was available the snippets were checked with it: all 80 Python compile
+with `compile()`, all 80 JavaScript parse through `vm.compileFunction`, all 82 PHP pass
+`php -l` and all 82 Bash pass `bash -n`.
 - **Topics:** `algorithms`, `data-structures`, `strings`, `math`, `async`, `web`, `oop`,
   `functional`, `errors`, `data`, `ui`, `devops`.
 - Picking nothing means *any*. Picking several is a union — `easy` + `hard` gives both.

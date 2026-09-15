@@ -255,6 +255,27 @@ SNIPPETS = [
 </noscript>
 ''', r'''Rendered only when scripting is switched off'''),
 
+    ("easy", "ui", r"""
+<aside class="callout">
+  <h3>Tip</h3>
+  <p>Enter skips the next line's indentation.</p>
+</aside>
+""", r"""Rendered: a side note titled "Tip\""""),
+    ("easy", "ui", r"""
+<search>
+  <form role="search" action="/search">
+    <label for="q">Find a snippet</label>
+    <input id="q" name="q" type="search" />
+  </form>
+</search>
+""", r"""Rendered: a search landmark screen readers can jump to"""),
+    ("easy", "ui", r"""
+<p>
+  Ratio <sub>wpm</sub> rose to 98<sup>th</sup> percentile.
+  <mark>New best.</mark>
+</p>
+""", r"""Rendered: subscript, superscript and a highlighted phrase"""),
+
     # ------------------------------------------------------------------- medium
     ("medium", "ui", r'''
 <article class="post" itemscope itemtype="https://schema.org/BlogPosting">
