@@ -110,6 +110,7 @@
     <button id="feedBtn" class="ghost">Feed</button>
     <button id="playersBtn" class="ghost">Players<span id="chBadge" class="ch-badge hidden">0</span></button>
     <button id="ranksBtn" class="ghost">Rankings</button>
+    <button id="awardsBtn" class="ghost">Awards</button>
     <button id="profileBtn" class="profile">
       <span id="profileAvatar" class="avatar"></span>
       <span id="profileName" class="pname">…</span>
@@ -222,6 +223,7 @@
   <div class="home-wrap">
     <div class="ranks-head">
       <h1>Feed</h1>
+      <button class="ghost js-back" type="button">back to the game</button>
     </div>
     <p class="sub">
       Every finished race is posted here. Like it, argue in the comments, or report it.
@@ -249,6 +251,7 @@
           screen the moment you click. <span id="playersLive" class="live">live</span>
         </p>
       </div>
+      <button class="ghost js-back" type="button">back to the game</button>
     </header>
 
     <div class="page-body">
@@ -302,6 +305,7 @@
           <span id="lobbiesLive" class="live">live</span>
         </p>
       </div>
+      <button class="ghost js-back" type="button">back to the game</button>
     </header>
 
     <div class="page-body">
@@ -341,6 +345,26 @@
             <input id="newPrivate" type="checkbox" />
             <span>private</span>
           </label>
+          <label class="field">
+            <span>player limit</span>
+            <select id="newLimit" class="lang-select">
+              <option value="0">No limit</option>
+              <option value="2">2 players</option>
+              <option value="3">3 players</option>
+              <option value="4">4 players</option>
+              <option value="6">6 players</option>
+              <option value="8">8 players</option>
+              <option value="12">12 players</option>
+            </select>
+          </label>
+          <label class="tog">
+            <input id="newStrict" type="checkbox" />
+            <span>strict typing</span>
+          </label>
+          <label class="tog">
+            <input id="newRanked" type="checkbox" checked />
+            <span>ranked</span>
+          </label>
           <label class="field hidden" id="newKeyField">
             <span>key <em class="muted">others need this to get in</em></span>
             <input id="newKey" maxlength="24" placeholder="a word you share" />
@@ -357,27 +381,93 @@
   </div>
 </main>
 
+<!-- ACHIEVEMENTS -->
+<main id="screen-awards" class="screen hidden">
+  <div class="page">
+    <header class="page-head">
+      <div>
+        <h1 id="awardsTitle">Achievements</h1>
+        <p class="sub" id="awardsSub">
+          Everything there is to earn, and how many people have earned it.
+        </p>
+      </div>
+      <button class="ghost js-back" type="button">back to the game</button>
+    </header>
+
+    <section class="panel">
+      <div class="award-progress">
+        <div class="award-count">
+          <b id="awardsEarned">0</b>
+          <span>of <i id="awardsTotal">0</i> earned</span>
+        </div>
+        <div class="award-bar"><i id="awardsBar"></i></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>earned <span id="awardsGotCount" class="muted"></span></h2>
+      <div id="awardsGot" class="award-grid"></div>
+      <p id="awardsNone" class="muted hidden">Nothing yet. Race one and that changes.</p>
+    </section>
+
+    <section class="panel">
+      <h2>still to earn <span id="awardsLeftCount" class="muted"></span></h2>
+      <div id="awardsLeft" class="award-grid"></div>
+    </section>
+  </div>
+</main>
+
 <!-- PUBLIC PROFILE -->
 <main id="screen-user" class="screen hidden">
   <div class="home-wrap">
     <div class="ranks-head">
       <h1 id="userTitle">Profile</h1>
+      <button class="ghost js-back" type="button">back to the game</button>
     </div>
 
-    <section class="panel">
+    <section class="panel hero">
+      <div class="hero-glow" aria-hidden="true"></div>
       <div class="user-head">
         <span id="userAvatar" class="avatar big"></span>
         <div class="user-meta">
           <h2 id="userName" class="user-name"></h2>
-          <p id="userRank" class="muted"></p>
+          <p class="user-titles">
+            <span id="userRankBadge" class="rank-badge"></span>
+            <span id="userRating" class="rate big"></span>
+          </p>
           <p id="userSeen" class="muted"></p>
         </div>
         <div class="user-actions">
           <button id="userChallenge" class="accent hidden" type="button">Challenge</button>
+          <button id="userAwards" class="ghost" type="button">Achievements</button>
           <button id="userReport" class="ghost hidden" type="button">Report</button>
         </div>
       </div>
 
+      <div id="userBadges" class="badges hidden"></div>
+      <div id="userDetails" class="details hidden"></div>
+    </section>
+
+    <section class="panel">
+      <h2>records</h2>
+      <div class="records">
+        <div class="record">
+          <b id="recWpm">0</b>
+          <span>Highest WPM</span>
+        </div>
+        <div class="record">
+          <b id="recWon">0</b>
+          <span>Games Won</span>
+        </div>
+        <div class="record">
+          <b id="recPlayed">0</b>
+          <span>Games Played</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>the rest <span class="muted">everything else on record</span></h2>
       <div id="userStats" class="win-stats"></div>
       <div id="userLangs" class="chips"></div>
     </section>
@@ -395,6 +485,7 @@
   <div class="home-wrap">
     <div class="ranks-head">
       <h1>Your snippets</h1>
+      <button class="ghost js-back" type="button">back to the game</button>
     </div>
     <p class="sub">
       Add code of your own. Public snippets join everyone's races; private ones
@@ -571,6 +662,31 @@
         <span class="fl-label">time</span>
         <div id="roomDurationChips" class="chips"></div>
       </div>
+      <div class="fl">
+        <span class="fl-label">seats</span>
+        <select id="roomLimit" class="lang-select">
+          <option value="0">No limit</option>
+          <option value="2">2 players</option>
+          <option value="3">3 players</option>
+          <option value="4">4 players</option>
+          <option value="6">6 players</option>
+          <option value="8">8 players</option>
+          <option value="12">12 players</option>
+        </select>
+      </div>
+      <div class="fl">
+        <span class="fl-label">mode</span>
+        <div class="toggles">
+          <label class="tog">
+            <input id="roomStrict" type="checkbox" />
+            <span>strict &mdash; type the indentation yourself</span>
+          </label>
+          <label class="tog">
+            <input id="roomRanked" type="checkbox" checked />
+            <span>ranked &mdash; the result moves everyone's rating</span>
+          </label>
+        </div>
+      </div>
       <p id="roomFilterNote" class="muted"></p>
     </div>
 
@@ -646,12 +762,18 @@
 
 <!-- PROFILE -->
 <div id="profileModal" class="modal hidden">
-  <div class="modal-card">
-    <h3 id="pfTitle">Your profile</h3>
+  <div class="modal-card roomy">
+    <div class="modal-head">
+      <h3 id="pfTitle">Your profile</h3>
+      <button id="pfViewPublic" class="ghost" type="button">view my public profile</button>
+    </div>
     <p class="muted">
       You were given a name and avatar automatically. Change either one here &mdash;
       this browser is recognised on every visit.
     </p>
+
+    <div class="pf-grid">
+    <div class="pf-col">
 
     <label class="field">
       <span>display name</span>
@@ -702,6 +824,38 @@
     </div>
 
     <div class="field">
+      <span>about you <em class="muted">optional, and shown on your public profile</em></span>
+      <div class="about-grid">
+        <label class="field">
+          <span>country</span>
+          <select id="pfCountry" class="lang-select"></select>
+        </label>
+        <label class="field">
+          <span>year of birth</span>
+          <select id="pfBirthYear" class="lang-select"></select>
+        </label>
+        <label class="field">
+          <span>gender</span>
+          <select id="pfGender" class="lang-select">
+            <option value="">Rather not say</option>
+            <option value="male">Male</option>
+            <option value="female">Female</option>
+            <option value="other">Other</option>
+          </select>
+        </label>
+      </div>
+      <span class="muted">
+        Anyone who opens your profile can see these, so leave out anything you
+        would rather strangers did not know. Leave a field blank and it is not
+        shown at all.
+      </span>
+    </div>
+
+    </div><!-- /pf-col -->
+
+    <div class="pf-col">
+
+    <div class="field">
       <span>appearance</span>
       <div id="themeGrid" class="theme-grid"></div>
       <span class="muted">
@@ -726,6 +880,9 @@
         </label>
       </div>
     </div>
+
+    </div><!-- /pf-col -->
+    </div><!-- /pf-grid -->
 
     <p id="pfErr" class="err"></p>
 

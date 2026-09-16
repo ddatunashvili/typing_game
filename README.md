@@ -182,6 +182,61 @@ anyone else: the racers still typing keep claiming the real finishing places, an
 resigned is slotted in behind them when the race closes, with no stars and the rating hit
 that last place earns.
 
+## Joining a race in progress
+
+Walking into a lobby mid-race puts you straight in it, from the top of the
+snippet against a clock that is already running. A timed race gives you what is
+left of the clock rather than a fresh one.
+
+Because a racer who stops typing would otherwise hold a classic race open for
+everyone, the first player home starts a last call: `LAST_CALL_SECONDS` (60 by
+default) and the race closes on whoever is still going, behind the finishers
+and with no stars.
+
+## Lobby modes
+
+Set when the lobby is opened, and changeable by the host until the race starts:
+
+- **Strict** - no auto-skipping of leading indentation. Every space and tab is
+  yours to type. It is the one real difficulty lever the game has.
+- **Unranked** - the race is recorded in full (races, wins, best WPM, stars,
+  feed post) but nobody's rating moves.
+- **Player limit** - 2 to 12 racers, or none. Spectators never take a seat, so
+  a full lobby can still be watched.
+
+Ratings also stay put when a race was not a contest between rated players:
+solo runs, and a lobby where the only opposition was bots. A bot types at a
+fixed synthetic speed, so beating one says nothing worth rating.
+
+## House lobbies
+
+The server keeps ten public rooms open - a different language, level and race
+length each - so the lobby browser is never an empty page. They are listed
+while empty, survive the last person leaving, and are refreshed once a day;
+a refresh skips any room somebody is actually in. `HOUSE_LOBBIES` and
+`HOUSE_LOBBY_REFRESH` tune the count and the interval.
+
+## Achievements
+
+37 of them, in four tiers, covering races, wins, speed, accuracy, stars,
+languages, submissions, win streaks and rating bands. Earning one is recorded
+with its date rather than recomputed, so an achievement keeps the day it was
+won even if the rule behind it later moves.
+
+The **Awards** page splits them into earned and still to earn. Each card shows
+the share of players who have ever raced that hold it, and a countable one
+shows how far along you are. A player's rarest badges appear on their profile
+under their name, and the rank badge next to it is coloured by rating band.
+
+## Profiles
+
+A profile leads with the three records - highest WPM, games won, games played -
+then the badges, then whatever optional details that player chose to publish:
+country (with its flag), age and gender. All three are optional and unset by
+default, and a field left blank is not shown at all rather than rendered as
+"unknown". Age is stored as a year of birth and worked out on read, so it never
+goes stale.
+
 ## Spectating
 
 Any unlocked lobby can be watched, from the **Spectate** button on its row in **Lobbies**
@@ -339,6 +394,7 @@ layout does not jump when one appears.
 | file | role |
 | --- | --- |
 | `main.py` | FastAPI app, lobby state machine, `/ws/{code}` websocket, REST API |
+| `achievements.py` | the achievement catalogue, awarding, and how rare each one is |
 | `snippets.py` | seed snippet library, tagged by language / level / topic |
 | `packs/` | per-language snippet packs; drop in a module and it is picked up |
 | `library.py` | reads snippets and settings from MySQL, falls back to the seed file |
@@ -364,8 +420,8 @@ Catalog and snippets:
   tags; `level` pins an exact level
 - `GET /api/playlist?lang=python&size=12&levels=&topics=` — an ordered run, for timed solo
 - `GET /api/config` — effective settings and where the library is being read from
-- `GET /api/lobby/new?lang=python&levels=&topics=&duration=60&private=0&key=&title=` —
-  create a lobby, returns its code
+- `GET /api/lobby/new?lang=python&levels=&topics=&duration=60&private=0&key=&title=`
+  `&strict=0&ranked=1&limit=0` — create a lobby, returns its code
 - `GET /api/lobby/{code}` — lobby snapshot
 - `GET /api/lobbies` — the lobby browser: public rooms in full, keyed private rooms as
   locked, keyless private rooms not at all
@@ -388,6 +444,10 @@ Accounts (all no-ops when no database is configured):
 - `GET /api/name-check?name=x` — is this display name free, plus suggestions if not
 - `GET|POST /api/settings` — client preferences (theme, gutter, guides) stored on the
   account, so they follow the player to another machine
+- `POST /api/profile` `{name, country, birth_year, gender}` — rename and set the optional
+  published details; a missing or unusable value clears that field
+- `GET /api/achievements?user=` — the whole catalogue, marked with what that player holds,
+  how rare each one is, and how far along the countable ones are
 
 Social:
 
@@ -409,7 +469,8 @@ Websocket `WS /ws/{code}?name=&pid=&create=0|1&lang=&levels=&topics=&duration=`
 `&spectate=0|1&key=&private=0|1&title=`
 
 Client → server: `chat`, `ready`, `start`, `restart`, `again`, `lang`, `filters`,
-`duration`, `bot`, `unbot`, `progress`, `finish`, `resign` — `again` swaps the snippet,
+`duration`, `mode`, `bot`, `unbot`, `progress`, `finish`, `resign` — `mode` sets
+`strict`, `ranked` and `limit` (host only, before the start), `again` swaps the snippet,
 `restart` starts another race, `bot`/`unbot` seat and remove a bot (host only), `resign`
 gives up without ending the race. With `spectate=1` the connection watches instead of
 racing and only `chat` is accepted from it.
@@ -510,6 +571,9 @@ production so the panel's injected value wins.
 | `HOST` | `0.0.0.0` | bind address |
 | `APP_TITLE` | `Code Typing Race` | FastAPI title |
 | `LOG_LEVEL` | `info` | uvicorn log level |
+| `LAST_CALL_SECONDS` | `60` | grace a classic race gives the stragglers once the first player is home |
+| `HOUSE_LOBBIES` | `10` | public rooms the server keeps open |
+| `HOUSE_LOBBY_REFRESH` | `86400` | seconds between refreshes of the idle ones |
 | `COUNTDOWN_SECONDS` | `5` | pre-race countdown |
 | `CHAT_HISTORY` | `100` | chat messages kept per lobby |
 | `WS_PING_INTERVAL` / `WS_PING_TIMEOUT` | `20` | websocket keepalive, raise if a proxy drops idle sockets |

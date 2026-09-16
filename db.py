@@ -4,6 +4,7 @@ Everything here degrades gracefully: if no database is configured or the server
 is unreachable, `enabled()` reports False and the game keeps working without
 accounts instead of failing requests.
 """
+import datetime
 import hashlib
 import json
 import logging
@@ -174,6 +175,9 @@ SCHEMA = (
         stars INT UNSIGNED NOT NULL DEFAULT 0,
         last_ip VARCHAR(45) NULL,
         settings TEXT NULL,
+        country CHAR(2) NULL,
+        birth_year SMALLINT UNSIGNED NULL,
+        gender VARCHAR(12) NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
@@ -336,6 +340,19 @@ SCHEMA = (
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """
+    CREATE TABLE IF NOT EXISTS cr_awards (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        user_id INT UNSIGNED NOT NULL,
+        slug VARCHAR(32) NOT NULL,
+        earned_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY uniq_cr_award (user_id, slug),
+        KEY idx_cr_awards_slug (slug),
+        CONSTRAINT fk_cr_award_user FOREIGN KEY (user_id)
+            REFERENCES cr_users (id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
     CREATE TABLE IF NOT EXISTS cr_races (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
         user_id INT UNSIGNED NOT NULL,
@@ -373,6 +390,10 @@ MIGRATIONS = (
     ("cr_snippets", "status", "ALTER TABLE cr_snippets ADD COLUMN status VARCHAR(10) NOT NULL DEFAULT 'public'"),
     ("cr_snippets", "reports", "ALTER TABLE cr_snippets ADD COLUMN reports INT UNSIGNED NOT NULL DEFAULT 0"),
     ("cr_users", "settings", "ALTER TABLE cr_users ADD COLUMN settings TEXT NULL"),
+    ("cr_users", "country", "ALTER TABLE cr_users ADD COLUMN country CHAR(2) NULL"),
+    ("cr_users", "birth_year",
+     "ALTER TABLE cr_users ADD COLUMN birth_year SMALLINT UNSIGNED NULL"),
+    ("cr_users", "gender", "ALTER TABLE cr_users ADD COLUMN gender VARCHAR(12) NULL"),
 )
 
 
@@ -571,7 +592,8 @@ def find_by_token(token: str) -> Optional[dict]:
     row = _one(
         """
         SELECT u.id, u.name, u.avatar_mime, u.avatar_version, u.races,
-               u.best_wpm, u.best_acc, u.rating, u.wins, u.stars, u.settings
+               u.best_wpm, u.best_acc, u.rating, u.wins, u.stars, u.settings,
+               u.country, u.birth_year, u.gender
         FROM cr_tokens AS t
         JOIN cr_users AS u ON u.id = t.user_id
         WHERE t.token = %s
@@ -587,7 +609,7 @@ def find_by_token(token: str) -> Optional[dict]:
     return _one(
         """
         SELECT id, name, avatar_mime, avatar_version, races, best_wpm, best_acc,
-               rating, wins, stars, settings
+               rating, wins, stars, settings, country, birth_year, gender
         FROM cr_users WHERE token = %s
         """,
         (hashed,),
@@ -696,6 +718,84 @@ def get_avatar(user_id: int) -> Optional[Tuple[bytes, str]]:
     if not row or not row.get("avatar_data") or not row.get("avatar_mime"):
         return None
     return bytes(row["avatar_data"]), str(row["avatar_mime"])
+
+
+# ---------- optional profile details ----------
+# Country, age and gender are what a player chooses to publish about themselves.
+# All three are optional and unset by default; an unset field is stored as NULL
+# and rendered as nothing rather than "unknown", so leaving one blank is a real
+# choice and not a gap in the profile.
+#
+# Age is stored as a year of birth rather than a number of years. An age column
+# is wrong the day after it is written; a birth year stays true, and the age is
+# derived on read.
+GENDERS = ("male", "female", "other")
+
+# Oldest plausible player, used only to reject a typo like 1089.
+MIN_BIRTH_YEAR = 1900
+
+
+def clean_country(value: Any) -> Optional[str]:
+    """Two ASCII letters, upper-cased. Anything else means unset."""
+    code = str(value or "").strip().upper()
+    if len(code) != 2 or not code.isalpha() or not code.isascii():
+        return None
+    return code
+
+
+def clean_birth_year(value: Any) -> Optional[int]:
+    try:
+        year = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    this_year = datetime.date.today().year
+    if year < MIN_BIRTH_YEAR or year > this_year:
+        return None
+    return year
+
+
+def clean_gender(value: Any) -> Optional[str]:
+    choice = str(value or "").strip().lower()
+    return choice if choice in GENDERS else None
+
+
+def age_from(birth_year: Any) -> Optional[int]:
+    """Years old, from a year of birth. None for anything unusable.
+
+    Whole years only, and only the year is stored, so this is off by up to one
+    either side of a birthday. That is the trade for not asking for a full date
+    of birth, which is a good deal more to hold on to than this needs.
+    """
+    year = clean_birth_year(birth_year)
+    if year is None:
+        return None
+    age = datetime.date.today().year - year
+    return age if 0 <= age <= 130 else None
+
+
+def save_details(
+    user_id: int,
+    country: Any = None,
+    birth_year: Any = None,
+    gender: Any = None,
+) -> None:
+    """Write all three at once. An unusable value clears that field."""
+    _exec(
+        "UPDATE cr_users SET country = %s, birth_year = %s, gender = %s WHERE id = %s",
+        (clean_country(country), clean_birth_year(birth_year), clean_gender(gender), user_id),
+    )
+
+
+def details_of(row: Optional[dict]) -> Dict[str, Any]:
+    """The publishable details off a user row, with the age already worked out."""
+    if not row:
+        return {"country": None, "birth_year": None, "age": None, "gender": None}
+    return {
+        "country": clean_country(row.get("country")),
+        "birth_year": clean_birth_year(row.get("birth_year")),
+        "age": age_from(row.get("birth_year")),
+        "gender": clean_gender(row.get("gender")),
+    }
 
 
 # ---------- per-account settings ----------

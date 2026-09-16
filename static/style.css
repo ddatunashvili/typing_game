@@ -925,7 +925,7 @@ input:focus, select:focus { border-color: color-mix(in srgb, var(--accent-2) 60%
 }
 .modal-card {
   width: 100%;
-  max-width: 420px;
+  max-width: min(560px, calc(100vw - 40px));
   padding: 22px;
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -1693,4 +1693,227 @@ body.spectating .code-area .ch.cur::after { display: none; }
 .ch-toast {
   background: var(--panel);
   border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+}
+
+
+/* ---------- profile records ----------
+   The three headline numbers. Bigger than the rest of the stat grid on
+   purpose: these are the figures a player came to the page to see. */
+.records {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+}
+.record {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-2);
+}
+.record b {
+  font-family: var(--mono);
+  font-size: clamp(26px, 3.4vw, 34px);
+  line-height: 1;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.record span {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1.3px;
+  color: var(--muted);
+}
+
+/* ---------- profile details ----------
+   Country, age, gender - only the ones the player filled in, so the row count
+   varies and the layout has to not care. */
+.details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 26px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+.detail { display: flex; flex-direction: column; gap: 2px; }
+.detail span {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--muted);
+}
+.detail b { font-size: 14px; }
+
+/* the three optional fields in the profile dialog */
+.about-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+  margin-top: 4px;
+}
+.about-grid .field { margin-bottom: 0; }
+
+
+/* ---------- roomy dialogs ----------
+   The profile dialog carries four unrelated groups of controls. On a desktop
+   they go side by side instead of down one long scroll. */
+.modal-card.roomy { max-width: min(900px, calc(100vw - 40px)); }
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.modal-head h3 { margin: 0; }
+.pf-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 0 28px;
+  align-items: start;
+}
+.pf-col { min-width: 0; }
+@media (max-width: 760px) {
+  .pf-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ---------- rank badge and achievement chips ---------- */
+.rank-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .4px;
+  text-transform: uppercase;
+}
+.rank-badge::before { content: "\25c6"; font-size: 9px; opacity: .85; }
+.tier-bronze { color: #d08c54; border-color: color-mix(in srgb, #d08c54 45%, var(--line)); }
+.tier-silver { color: #9fb2c8; border-color: color-mix(in srgb, #9fb2c8 45%, var(--line)); }
+.tier-gold   { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+.tier-legend {
+  color: #c79bff;
+  border-color: color-mix(in srgb, #c79bff 55%, var(--line));
+  box-shadow: 0 0 14px color-mix(in srgb, #c79bff 22%, transparent);
+}
+
+.user-titles { display: flex; align-items: center; gap: 10px; margin: 6px 0; flex-wrap: wrap; }
+.rate.big { font-family: var(--mono); font-size: 18px; color: var(--accent); }
+
+.badges { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 14px; }
+.badge-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-2);
+  font-size: 12px;
+}
+.badge-chip i { font-style: normal; font-size: 14px; line-height: 1; }
+.badge-chip.more { color: var(--muted); padding: 4px 10px; }
+
+/* A profile header worth looking at: the avatar lit from behind by the
+   accent, rather than another flat panel. */
+.panel.hero { position: relative; overflow: hidden; }
+.hero-glow {
+  position: absolute;
+  inset: -60% 55% 40% -20%;
+  background: radial-gradient(
+    closest-side,
+    color-mix(in srgb, var(--accent) 22%, transparent),
+    transparent
+  );
+  pointer-events: none;
+}
+.panel.hero > *:not(.hero-glow) { position: relative; }
+.panel.hero .avatar.big {
+  box-shadow: 0 0 0 3px var(--panel), 0 0 0 4px color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+/* .panel h2 is a small uppercase section label, which is not what a player's
+   own name should look like on their own profile. */
+.panel .user-name {
+  display: block;
+  margin: 0;
+  font-size: clamp(22px, 3vw, 30px);
+  line-height: 1.15;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text);
+}
+
+/* ---------- achievements ---------- */
+.award-progress { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+.award-count { display: flex; align-items: baseline; gap: 8px; }
+.award-count b {
+  font-family: var(--mono);
+  font-size: 34px;
+  line-height: 1;
+  color: var(--accent);
+}
+.award-count span { color: var(--muted); font-size: 13px; }
+.award-count i { font-style: normal; color: var(--text); }
+.award-bar {
+  flex: 1 1 220px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+.award-bar > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width .5s ease;
+}
+
+.award-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 10px;
+}
+.award {
+  display: flex;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-2);
+}
+.award-icon { font-size: 26px; line-height: 1.1; }
+.award-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.award-name { font-size: 14px; }
+.award-blurb, .award-meta { font-size: 12px; }
+/* Locked achievements stay readable - greyed to the point of illegibility,
+   they stop being something to aim at. */
+.award.locked { opacity: .62; }
+.award.locked .award-icon { filter: grayscale(1); }
+.award.got { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
+.award.got.tier-gold { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+.award.got.tier-legend {
+  border-color: color-mix(in srgb, #c79bff 55%, var(--line));
+  box-shadow: 0 0 18px color-mix(in srgb, #c79bff 16%, transparent);
+}
+.award-track {
+  margin-top: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--sunken);
+  overflow: hidden;
+}
+.award-track > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--accent-2);
 }

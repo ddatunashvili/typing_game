@@ -30,6 +30,7 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
+import achievements
 import bots
 import db
 import library
@@ -84,7 +85,9 @@ async def lifespan(_: FastAPI):
     await run_in_threadpool(library.seed)
     await run_in_threadpool(library.refresh, True)
     log.info("snippet library loaded from the %s", library.source())
+    keeper = asyncio.create_task(house_keeper())
     yield
+    keeper.cancel()
     await run_in_threadpool(db.close)
 
 
@@ -95,6 +98,12 @@ app = FastAPI(
 
 LOBBY_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 MAX_RACE_SECONDS = 1800
+
+# Classic mode ends when everyone has finished, which means one racer who stops
+# typing holds the whole lobby open. Once the first player is home the rest get
+# this long to finish, and then the race closes without them. Joining midway is
+# allowed now, so an idle straggler is a good deal more likely than it was.
+LAST_CALL_SECONDS = env_int("LAST_CALL_SECONDS", 60)
 
 
 def countdown_seconds() -> int:
@@ -256,8 +265,22 @@ class Lobby:
         private: bool = False,
         key: str = "",
         title: str = "",
+        strict: bool = False,
+        ranked: bool = True,
+        limit: int = 0,
+        house: bool = False,
     ):
         self.code = code
+        # 0 means no limit. Counts racers only - a spectator takes no seat.
+        self.limit = max(0, min(32, int(limit or 0)))
+        # A house lobby is one the server opened. It is listed while empty and
+        # is not torn down when the last person leaves, so the browser is never
+        # a blank page for whoever arrives first.
+        self.house = bool(house)
+        # Strict: no auto-skipping of leading indentation, every space typed.
+        self.strict = bool(strict)
+        # Unranked: the race is recorded in full, it just does not move Elo.
+        self.ranked = bool(ranked)
         # A private lobby is hidden from the browser unless it has a key, in
         # which case it is listed as locked and the key is the way in. The code
         # on its own is never enough for a keyed lobby.
@@ -290,6 +313,7 @@ class Lobby:
         self.task: Optional[asyncio.Task] = None
         self.chat: List[dict] = []
         self.finish_count = 0
+        self.last_call: Optional[asyncio.Task] = None
 
     def add_bot(self, slug: str) -> Optional[Player]:
         """Seat a bot. Returns None for an unknown slug or a duplicate."""
@@ -323,6 +347,13 @@ class Lobby:
     def humans(self) -> List[Player]:
         return [p for p in self.roster() if not p.bot]
 
+    def full(self, pid: str = "") -> bool:
+        """Is there a seat left? A player rejoining their own seat always fits."""
+        if not self.limit:
+            return False
+        seated = [p for p in self.roster() if p.id != pid]
+        return len(seated) >= self.limit
+
     def watcher_list(self) -> List[dict]:
         return [
             {"id": w.id, "name": w.name, "uid": w.uid, "avatar": w.avatar}
@@ -343,6 +374,10 @@ class Lobby:
             "state": self.state,
             "private": self.private,
             "locked": bool(self.key),
+            "strict": self.strict,
+            "ranked": self.ranked,
+            "limit": self.limit,
+            "house": self.house,
             "host": host.name if host else "",
             "players": len(racers),
             "humans": len([p for p in racers if not p.bot]),
@@ -398,6 +433,10 @@ class Lobby:
             "private": self.private,
             "locked": bool(self.key),
             "title": self.title,
+            "strict": self.strict,
+            "ranked": self.ranked,
+            "limit": self.limit,
+            "house": self.house,
             "players": [p.public() for p in self.roster()],
             "watchers": self.watcher_list(),
         }
@@ -442,6 +481,9 @@ class Lobby:
         if self.timer and not self.timer.done():
             self.timer.cancel()
         self.timer = None
+        if self.last_call and not self.last_call.done():
+            self.last_call.cancel()
+        self.last_call = None
         self.ends_at = 0.0
         for task in self.bot_tasks:
             if not task.done():
@@ -569,6 +611,7 @@ class Lobby:
         await self.system(
             "%s finished #%d at %.0f wpm" % (player.name, player.place, player.wpm)
         )
+        self.arm_last_call()
         await self.push_state()
         await self.maybe_finish()
 
@@ -598,6 +641,38 @@ class Lobby:
         await self.broadcast({"t": "time_up"})
         await self.score_race()
         await self.push_state()
+
+    def arm_last_call(self) -> None:
+        """Start the countdown that closes a classic race on the stragglers."""
+        if self.duration > 0 or self.state != "racing":
+            return  # timed mode already has a clock of its own
+        if self.last_call and not self.last_call.done():
+            return
+        self.last_call = asyncio.create_task(self._last_call())
+
+    async def _last_call(self) -> None:
+        try:
+            await self.system(
+                "first one home - %ds left for everyone else" % LAST_CALL_SECONDS
+            )
+            await asyncio.sleep(LAST_CALL_SECONDS)
+            if self.state != "racing":
+                return
+            stragglers = [p for p in self.roster() if not p.finished]
+            if not stragglers:
+                return
+            for player in stragglers:
+                # They did not complete the snippet, so they score as if they
+                # had stopped - but they are out of time, not out of nerve.
+                player.gave_up = True
+                player.finished = True
+                if player.time is None:
+                    player.time = max(0.0, time.time() - self.start_ts)
+            await self.system("time called - the race is closed")
+            await self.push_state()
+            await self.maybe_finish()
+        except asyncio.CancelledError:
+            pass
 
     async def resign(self, player: Player) -> None:
         """A racer gives up: they stop, but the race carries on without them.
@@ -632,10 +707,16 @@ class Lobby:
         await self.push_state()
 
     async def score_race(self) -> None:
-        """Award stars, run the Elo update and persist it. Idempotent per race."""
+        """Settle the race in memory, show it, then write it down."""
         racers = self.roster()
         if not racers:
             return
+        self.settle(racers)
+        await self.push_state()
+        asyncio.create_task(self.persist(racers))
+
+    def settle(self, racers: List[Player]) -> None:
+        """Stars and Elo. Pure bookkeeping - no database, no waiting."""
 
         length = max(1, len(self.snip.get("code", "")))
         if self.duration > 0:
@@ -654,7 +735,7 @@ class Lobby:
                 player.acc, errors, span, completed, player.place == 1
             )
 
-        # Elo: guests and bots are opposition but keep no rating of their own
+        # Elo: guests and bots are opposition but keep no rating of their own.
         entries = [
             {
                 "key": p.id,
@@ -664,12 +745,20 @@ class Lobby:
             }
             for p in racers
         ]
-        deltas = rating.race_deltas(entries) if len(entries) > 1 else {}
+        # Two conditions have to hold for anyone's rating to move: the lobby is
+        # ranked, and at least two rated players were in it. A bot types at a
+        # fixed synthetic speed, so beating one says nothing about you and must
+        # not be worth rating - and the same goes for a lobby of one.
+        rated = [p for p in racers if p.uid and not p.bot]
+        contested = self.ranked and len(rated) > 1
+        deltas = rating.race_deltas(entries) if contested and len(entries) > 1 else {}
         for player in racers:
             player.delta = int(deltas.get(player.id, 0))
             if player.delta:
                 player.rating = rating.apply_delta(player.rating, player.delta)
 
+    async def persist(self, racers: List[Player]) -> None:
+        """Write the race to the database and hand out anything it unlocked."""
         if not db.enabled():
             return
         level = "mixed" if len(self.playlist) > 1 else self.snip.get("level", "")
@@ -720,6 +809,34 @@ class Lobby:
             except Exception as exc:
                 log.warning("could not post race for %s: %s", player.name, exc)
 
+            # Anything this result has just unlocked. Done after the race is
+            # recorded, so the totals it reads already include this race.
+            beat_better = any(
+                o is not player
+                and o.place is not None
+                and player.place is not None
+                and player.place < o.place
+                and o.rating - player.rating >= 200
+                for o in racers
+            )
+            try:
+                fresh = await run_in_threadpool(
+                    achievements.award,
+                    player.uid,
+                    {"beat_better": beat_better, "rivals": len(names) - 1},
+                )
+            except Exception as exc:
+                log.warning("could not award achievements: %s", exc)
+                fresh = []
+            if fresh:
+                await self.broadcast(
+                    {"t": "awards", "id": player.id, "awards": fresh}
+                )
+                for item in fresh:
+                    await self.system(
+                        "%s unlocked %s %s" % (player.name, item["icon"], item["name"])
+                    )
+
     async def maybe_finish(self) -> None:
         racers = self.roster()
         if self.state != "racing" or not racers:
@@ -739,6 +856,83 @@ class Lobby:
 
 
 lobbies: Dict[str, Lobby] = {}
+
+# Ten rooms the server keeps open so the lobby browser is never empty. One per
+# entry, refreshed daily; a room somebody is sitting in is left alone.
+HOUSE_LOBBY_COUNT = env_int("HOUSE_LOBBIES", 10)
+HOUSE_REFRESH_SECONDS = env_int("HOUSE_LOBBY_REFRESH", 86400)
+
+HOUSE_PLAN = [
+    {"title": "Warm-up", "lang": "python", "levels": ["very-easy"], "duration": 0},
+    {"title": "Coffee break", "lang": "javascript", "levels": ["easy"], "duration": 60},
+    {"title": "Sprint", "lang": "typescript", "levels": ["easy"], "duration": 30},
+    {"title": "Steady pace", "lang": "go", "levels": ["medium"], "duration": 120},
+    {"title": "Deep end", "lang": "rust", "levels": ["hard"], "duration": 0,
+     "strict": True},
+    {"title": "Curly braces", "lang": "java", "levels": ["medium"], "duration": 60},
+    {"title": "Systems", "lang": "c", "levels": ["medium"], "duration": 0},
+    {"title": "Query hour", "lang": "sql", "levels": [], "duration": 60},
+    {"title": "Front of house", "lang": "css", "levels": [], "duration": 60},
+    {"title": "Shell session", "lang": "bash", "levels": [], "duration": 30,
+     "ranked": False},
+]
+
+
+def house_lobbies() -> List[Lobby]:
+    return [lobby for lobby in lobbies.values() if lobby.house]
+
+
+def stock_house() -> int:
+    """Top the house rooms back up to `HOUSE_LOBBY_COUNT`. Returns how many opened."""
+    wanted = max(0, min(len(HOUSE_PLAN), HOUSE_LOBBY_COUNT))
+    have = {lobby.title for lobby in house_lobbies()}
+    opened = 0
+    for plan in HOUSE_PLAN[:wanted]:
+        if plan["title"] in have:
+            continue
+        code = new_code()
+        lobbies[code] = Lobby(
+            code,
+            plan.get("lang", "python"),
+            clean_ids(plan.get("levels"), LEVEL_IDS),
+            [],
+            plan.get("duration", 0),
+            title=plan["title"],
+            strict=bool(plan.get("strict")),
+            ranked=plan.get("ranked", True),
+            limit=int(plan.get("limit", 0)),
+            house=True,
+        )
+        opened += 1
+    return opened
+
+
+async def house_keeper() -> None:
+    """Open the house rooms at startup, then refresh them once a day.
+
+    A refresh only touches rooms nobody is in: the point is a fresh snippet on
+    an idle room, not throwing anyone out of a race they are in the middle of.
+    """
+    try:
+        opened = stock_house()
+        log.info("house lobbies open: %d", opened)
+        await announce_lobbies()
+        while True:
+            await asyncio.sleep(HOUSE_REFRESH_SECONDS)
+            retired = 0
+            for lobby in house_lobbies():
+                if lobby.players or lobby.watchers:
+                    continue
+                lobby.cancel_task()
+                lobbies.pop(lobby.code, None)
+                retired += 1
+            opened = stock_house()
+            log.info("house lobbies refreshed: %d retired, %d opened", retired, opened)
+            await announce_lobbies()
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        log.warning("house keeper stopped: %s", exc)
 
 
 # ---------- live notification hub ----------
@@ -1417,6 +1611,9 @@ async def api_new_lobby(
     private: int = 0,
     key: str = "",
     title: str = "",
+    strict: int = 0,
+    ranked: int = 1,
+    limit: int = 0,
 ):
     code = new_code()
     lobby = Lobby(
@@ -1428,6 +1625,9 @@ async def api_new_lobby(
         private=bool(private),
         key=key,
         title=title,
+        strict=bool(strict),
+        ranked=bool(ranked),
+        limit=limit,
     )
     lobbies[code] = lobby
     seated = lobby.add_bot(bot) if bot else None
@@ -1449,7 +1649,7 @@ async def api_lobbies():
     """
     open_rooms, locked_rooms = [], []
     for lobby in lobbies.values():
-        if not lobby.players and not lobby.watchers:
+        if not lobby.players and not lobby.watchers and not lobby.house:
             continue  # created but nobody has connected yet
         if lobby.private and not lobby.key:
             continue
@@ -1495,6 +1695,7 @@ async def api_me(request: Request):
         await run_in_threadpool(db.seen, int(row["id"]), ip)
         user = db.public_user(row)
         user["settings"] = db.read_settings(row)
+        user.update(db.details_of(row))
         return {"accounts": True, "user": user}
 
     # No cookie. Re-attach to the account last seen from this IP if there is
@@ -1593,8 +1794,33 @@ async def api_profile(request: Request):
         )
 
     await run_in_threadpool(db.rename, uid, name)
+    # Country, age and gender are optional: a missing or unusable value clears
+    # the field rather than failing the save, so a player can always take one
+    # back down again.
+    await run_in_threadpool(
+        db.save_details,
+        uid,
+        body.get("country"),
+        body.get("birth_year"),
+        body.get("gender"),
+    )
     row = await run_in_threadpool(db.find_by_token, request.cookies[COOKIE_NAME])
-    return {"user": db.public_user(row)}
+    user = db.public_user(row)
+    user.update(db.details_of(row))
+    return {"user": user}
+
+
+@app.get("/api/achievements")
+async def api_achievements(request: Request, user: int = 0):
+    """The whole catalogue, marked up for whoever is being looked at."""
+    if not db.enabled():
+        return {"achievements": [], "earned": 0, "total": 0, "players": 0}
+    viewer = await current_user(request)
+    target = user or (int(viewer["id"]) if viewer else 0)
+    data = await run_in_threadpool(achievements.board, target or None)
+    data["user"] = target
+    data["me"] = bool(viewer) and target == int(viewer["id"])
+    return data
 
 
 @app.get("/api/settings")
@@ -1758,7 +1984,17 @@ async def api_race(request: Request):
         )
     except Exception as exc:
         log.warning("could not post solo run: %s", exc)
-    return {"ok": True, "stars": earned, "note": rating.star_note(earned)}
+    try:
+        fresh = await run_in_threadpool(achievements.award, int(user["id"]))
+    except Exception as exc:
+        log.warning("could not award achievements: %s", exc)
+        fresh = []
+    return {
+        "ok": True,
+        "stars": earned,
+        "note": rating.star_note(earned),
+        "awards": fresh,
+    }
 
 
 # ---------- websocket ----------
@@ -1845,6 +2081,9 @@ async def ws_lobby(
     key: str = Query(""),
     private: int = Query(0),
     title: str = Query(""),
+    strict: int = Query(0),
+    ranked: int = Query(1),
+    limit: int = Query(0),
 ):
     code = code.upper()
     await websocket.accept()
@@ -1864,6 +2103,9 @@ async def ws_lobby(
             private=bool(private),
             key=key,
             title=title,
+            strict=bool(strict),
+            ranked=bool(ranked),
+            limit=limit,
         )
         lobbies[code] = lobby
     elif lobby.key and lobby.key != key:
@@ -1873,6 +2115,13 @@ async def ws_lobby(
         return
 
     pid = pid or uuid.uuid4().hex[:12]
+    if not spectate and lobby.full(pid):
+        # Watching is still on the table, which is why this only blocks racers.
+        await websocket.send_text(
+            json.dumps({"t": "error", "code": "full", "limit": lobby.limit})
+        )
+        await websocket.close()
+        return
     ip = client_ip(websocket)
 
     # A recognised player races under their saved profile name.
@@ -1954,7 +2203,7 @@ async def ws_lobby(
             pass
         finally:
             lobby.watchers.pop(pid, None)
-            if lobby.players or lobby.watchers:
+            if lobby.players or lobby.watchers or lobby.house:
                 await lobby.system(name + " stopped watching")
                 await lobby.push_state()
             else:
@@ -1968,8 +2217,13 @@ async def ws_lobby(
         player.uid = int(account["id"])
         player.avatar = int(account.get("avatar_version") or 0) if account.get("avatar_mime") else 0
         player.rating = int(account.get("rating") or rating.START_RATING)
-    if lobby.state in ("racing", "countdown"):
-        player.finished = True  # late joiner spectates this round
+    joined_late = lobby.state in ("racing", "countdown")
+    if joined_late:
+        # Straight into the race that is already running, rather than sitting
+        # the round out. They start at the top of the snippet against a clock
+        # that is already going, so they are behind - but watching a race you
+        # walked into is not why anyone opens a lobby.
+        player.ready = True
     lobby.players[pid] = player
     if pid not in lobby.order:
         lobby.order.append(pid)
@@ -1982,7 +2236,14 @@ async def ws_lobby(
     for msg in lobby.chat[-40:]:
         await websocket.send_text(json.dumps(msg))
     await lobby.push_state()
-    await lobby.system(name + " joined")
+    await lobby.system(name + (" joined mid-race" if joined_late else " joined"))
+    if joined_late and lobby.state == "racing":
+        # tell them the race is already on, and where the clock is
+        await websocket.send_text(
+            json.dumps(
+                {"t": "go", "start_ts": lobby.start_ts, "ends_at": lobby.ends_at}
+            )
+        )
     asyncio.create_task(announce_lobbies())
     asyncio.create_task(announce_presence())
 
@@ -2049,6 +2310,30 @@ async def ws_lobby(
                         ", ".join(lobby.topics) or "any",
                     )
                 )
+
+            elif kind == "mode":
+                # Strict typing and ranked/unranked. Both are settled before the
+                # race starts, never during one.
+                if pid != lobby.host or lobby.state in ("countdown", "racing"):
+                    continue
+                if "strict" in msg:
+                    lobby.strict = bool(msg.get("strict"))
+                if "ranked" in msg:
+                    lobby.ranked = bool(msg.get("ranked"))
+                if "limit" in msg:
+                    try:
+                        lobby.limit = max(0, min(32, int(msg.get("limit") or 0)))
+                    except (TypeError, ValueError):
+                        pass
+                await lobby.push_state()
+                await lobby.system(
+                    "%s · %s"
+                    % (
+                        "strict typing" if lobby.strict else "indentation auto-skipped",
+                        "ranked" if lobby.ranked else "unranked",
+                    )
+                )
+                asyncio.create_task(announce_lobbies())
 
             elif kind == "duration":
                 if pid != lobby.host or lobby.state in ("countdown", "racing"):
@@ -2147,6 +2432,7 @@ async def ws_lobby(
                 await lobby.system(
                     "%s finished #%d at %.0f wpm" % (player.name, player.place, player.wpm)
                 )
+                lobby.arm_last_call()
                 await lobby.push_state()
                 await lobby.maybe_finish()
 
@@ -2171,6 +2457,13 @@ async def ws_lobby(
             lobby.host = None
             await lobby.system(player.name + " left - no racers")
             await lobby.push_state()
+        elif lobby.house:
+            # the house keeps its rooms; reset it and leave it on the board
+            lobby.cancel_task()
+            lobby.state = "waiting"
+            lobby.host = None
+            lobby.order = []
+            lobby.reroll()
         else:
             lobby.cancel_task()
             lobbies.pop(code, None)

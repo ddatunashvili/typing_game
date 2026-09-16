@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 
 import time
 
+import achievements
 import db
 import rating
 
@@ -445,7 +446,7 @@ def _idle_seconds(row: dict) -> int:
 def profile(user_id: int) -> Optional[dict]:
     row = db.one(
         "SELECT id, name, avatar_mime, avatar_version, races, best_wpm, best_acc, "
-        "rating, wins, stars, created_at, last_seen_at, "
+        "rating, wins, stars, country, birth_year, gender, created_at, last_seen_at, "
         "TIMESTAMPDIFF(SECOND, last_seen_at, NOW()) AS idle "
         "FROM cr_users WHERE id = %s",
         (user_id,),
@@ -458,6 +459,14 @@ def profile(user_id: int) -> Optional[dict]:
     out["joined"] = str(row.get("created_at") or "")
     out["idle"] = idle
     out["online"] = idle <= 300
+    # whatever this player chose to publish about themselves; any of these may
+    # be None, which the profile renders as an absent row rather than a blank one
+    out.update(db.details_of(row))
+    # the badges shown under the name; rarest first, so the best one leads
+    try:
+        out["awards"] = achievements.for_user(user_id)
+    except Exception:
+        out["awards"] = []
 
     extra = db.one(
         "SELECT COUNT(*) AS races, COALESCE(AVG(wpm), 0) AS avg_wpm, "

@@ -138,6 +138,54 @@
     }
   }
 
+  /* ---------- countries ----------
+     Only the ISO 3166-1 alpha-2 codes are held here. The browser turns a code
+     into a name in the reader's own language through Intl.DisplayNames, and the
+     flag is the two letters shifted into the regional-indicator block, so
+     neither a name table nor a sprite sheet has to be shipped or kept current. */
+  const COUNTRY_CODES = (
+    "AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI " +
+    "BJ BL BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN " +
+    "CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK " +
+    "FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM " +
+    "HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN " +
+    "KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK " +
+    "ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP " +
+    "NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW " +
+    "SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF " +
+    "TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI " +
+    "VN VU WF WS YE YT ZA ZM ZW"
+  ).split(" ");
+
+  let COUNTRY_NAMES = null;
+  try {
+    COUNTRY_NAMES = new Intl.DisplayNames(undefined, { type: "region" });
+  } catch (err) {
+    COUNTRY_NAMES = null;  // very old browser: the code itself has to do
+  }
+
+  function countryName(code) {
+    if (!code) return "";
+    if (!COUNTRY_NAMES) return code;
+    try {
+      return COUNTRY_NAMES.of(code) || code;
+    } catch (err) {
+      return code;
+    }
+  }
+
+  /** "GB" -> the flag emoji, by shifting each letter into regional indicators. */
+  function countryFlag(code) {
+    if (!code || code.length !== 2) return "";
+    const base = 0x1f1e6 - 65;
+    return String.fromCodePoint(
+      base + code.charCodeAt(0),
+      base + code.charCodeAt(1)
+    );
+  }
+
+  const GENDER_LABELS = { male: "Male", female: "Female", other: "Other" };
+
   /* ---------- themes and display preferences ----------
      The browser is the source of truth: the choice is written to localStorage
      first (and applied to <html> straight away) so it survives a reload with
@@ -548,8 +596,11 @@
     if (!R.startedAt) R.startedAt = performance.now();
     if (endsAtMs != null) R.endsAt = endsAtMs;
     el.codeBox.classList.remove("locked");
+    const strict = S.lobby && S.lobby.strict && !S.solo;
     el.hint.textContent = R.timed
       ? "type! — a new snippet appears while the clock runs"
+      : strict
+      ? "type! — strict lobby: the indentation is yours to type"
       : "type! — indentation is auto-skipped";
     focusTrap();
     loop();
@@ -604,6 +655,9 @@
   }
 
   function autoSkipIndent() {
+    // Strict lobbies make you type every space. It is the one real difficulty
+    // lever the game has, so it belongs to the lobby, not to a preference.
+    if (S.lobby && S.lobby.strict && !S.solo) return;
     if (T.pos === 0 || T.code[T.pos - 1] !== "\n") return;
     while (T.pos < T.code.length && (T.code[T.pos] === " " || T.code[T.pos] === "\t")) {
       T.chars[T.pos].classList.add("done");
@@ -1233,9 +1287,50 @@
     }
   }
 
+  /** Country and birth-year pickers, built once and reused. */
+  function fillAboutFields() {
+    const country = el2("pfCountry");
+    if (country && !country.options.length) {
+      const blank = document.createElement("option");
+      blank.value = "";
+      blank.textContent = "Rather not say";
+      country.appendChild(blank);
+      // sorted by the name the reader actually sees, not by the code
+      const sorted = COUNTRY_CODES.map((code) => [code, countryName(code)]).sort(
+        (a, b) => a[1].localeCompare(b[1])
+      );
+      for (const [code, label] of sorted) {
+        const opt = document.createElement("option");
+        opt.value = code;
+        opt.textContent = countryFlag(code) + "  " + label;
+        country.appendChild(opt);
+      }
+    }
+
+    const year = el2("pfBirthYear");
+    if (year && !year.options.length) {
+      const blank = document.createElement("option");
+      blank.value = "";
+      blank.textContent = "Rather not say";
+      year.appendChild(blank);
+      const now = new Date().getFullYear();
+      for (let y = now; y >= now - 100; y--) {
+        const opt = document.createElement("option");
+        opt.value = String(y);
+        // the age this year of birth works out to, so nobody has to do the sum
+        opt.textContent = y + "  (" + (now - y) + ")";
+        year.appendChild(opt);
+      }
+    }
+  }
+
   function openProfile() {
     renderThemes();
     wireDisplayToggles();
+    fillAboutFields();
+    el2("pfCountry").value = (S.me && S.me.country) || "";
+    el2("pfBirthYear").value = (S.me && S.me.birth_year) ? String(S.me.birth_year) : "";
+    el2("pfGender").value = (S.me && S.me.gender) || "";
     el.pfErr.textContent = "";
     el.pfAvatar.value = "";
     el.pfTitle.textContent = "Your profile";
@@ -1389,7 +1484,13 @@
         method: "POST",
         credentials: "same-origin",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name }),
+        // Blank means "rather not say", and the server stores that as unset.
+        body: JSON.stringify({
+          name,
+          country: el2("pfCountry").value || "",
+          birth_year: el2("pfBirthYear").value || "",
+          gender: el2("pfGender").value || "",
+        }),
       });
       const data = await res.json();
       if (res.status === 409) {
@@ -1545,6 +1646,8 @@
             ? "lobby not found"
             : m.code === "bad_key"
             ? "that lobby needs a key"
+            : m.code === "full"
+            ? "that lobby is full (" + (m.limit || "") + ") — you can still spectate"
             : "connection error";
         break;
       case "chat":
@@ -1559,7 +1662,7 @@
       case "countdown":
         showCountdown(m.n);
         break;
-      case "go":
+      case "go": {
         el.countdown.classList.add("hidden");
         if (S.spectating) break;
         if (S.lobby) {
@@ -1571,12 +1674,18 @@
             renderCode(first.code, S.lobby.language);
           }
         }
+        // start_ts is in the past for someone who joined mid-race, so a timed
+        // race gives them what is left of the clock, not a fresh full one.
+        const timed = S.lobby && S.lobby.duration > 0;
+        const endsMs = m.ends_at ? m.ends_at * 1000 - Date.now() : 0;
         armRace(
-          S.lobby && S.lobby.duration > 0
-            ? performance.now() + S.lobby.duration * 1000
+          timed
+            ? performance.now() +
+                Math.max(0, m.ends_at ? endsMs : S.lobby.duration * 1000)
             : null
         );
         break;
+      }
       case "time_up":
         timeUp();
         break;
@@ -1605,6 +1714,25 @@
       !(!watching && st.state === "racing" && me && !me.finished)
     );
     paintWatchers(st);
+
+    // Lobby mode. Only the host may change either, and only before the start.
+    const strictBox = el2("roomStrict");
+    const rankedBox = el2("roomRanked");
+    const limitBox = el2("roomLimit");
+    if (strictBox && rankedBox) {
+      strictBox.checked = !!st.strict;
+      rankedBox.checked = st.ranked !== false;
+      const settled = !isHost || st.state === "countdown" || st.state === "racing";
+      strictBox.disabled = settled;
+      rankedBox.disabled = settled;
+      if (limitBox) {
+        limitBox.value = String(st.limit || 0);
+        limitBox.disabled = settled;
+      }
+    }
+    el.stateBadge.title =
+      (st.strict ? "strict typing" : "indentation auto-skipped") +
+      " · " + (st.ranked === false ? "unranked" : "ranked");
     const over = st.state === "finished";
     el.again.classList.toggle("hidden", !(isHost && over));
     el.newSnip.classList.toggle("hidden", !(isHost && over));
@@ -1626,13 +1754,20 @@
     // code area until the round ended.
     const idle = watching || !me || me.finished;
     const armed = st.state === "racing" && !idle;
-    if (!armed && (!prev || prev.state !== st.state || prev.snippet !== st.snippet)) {
+    // Nothing rendered yet: either a fresh join or a walk-in on a race already
+    // running. Either way the run has to be set up even though `armed` would
+    // normally mean "leave the code alone, someone is typing on it".
+    const fresh = !T.chars.length;
+    if (
+      fresh ||
+      (!armed && (!prev || prev.state !== st.state || prev.snippet !== st.snippet))
+    ) {
       initRun(st.duration > 0, st.playlist || []);
     }
 
     const snippetChanged =
       !prev || prev.snippet !== st.snippet || prev.language !== st.language;
-    if ((snippetChanged && !armed) || (!T.chars.length && st.snippet)) {
+    if (fresh || (snippetChanged && !armed)) {
       renderCode(st.snippet, st.language);
     }
     if (idle) el.codeBox.classList.add("locked");
@@ -2013,7 +2148,7 @@
     hideRun();
     el.ranks.classList.add("hidden");
     for (const id of ["screen-feed", "screen-players", "screen-user", "screen-snippets",
-                     "screen-lobbies"]) {
+                     "screen-lobbies", "screen-awards"]) {
       const node = document.getElementById(id);
       if (node) node.classList.add("hidden");
     }
@@ -2036,7 +2171,7 @@
   function showRoom() {
     el.ranks.classList.add("hidden");
     for (const id of ["screen-feed", "screen-players", "screen-user", "screen-snippets",
-                     "screen-lobbies"]) {
+                     "screen-lobbies", "screen-awards"]) {
       const node = document.getElementById(id);
       if (node) node.classList.add("hidden");
     }
@@ -2482,7 +2617,8 @@
   function screenOnly(node) {
     for (const s of [el.home, el.room, el.ranks, el2("screen-feed"),
                      el2("screen-players"), el2("screen-user"),
-                     el2("screen-snippets"), el2("screen-lobbies")]) {
+                     el2("screen-snippets"), el2("screen-lobbies"),
+                     el2("screen-awards")]) {
       if (s) s.classList.toggle("hidden", s !== node);
     }
     clearInterval(S.ranksTimer);
@@ -2774,11 +2910,23 @@
 
       el2("userTitle").textContent = d.me ? "Your profile" : "Profile";
       el2("userName").textContent = p.name;
-      el2("userRank").textContent = p.rank + " · " + p.rating;
+      const badge = el2("userRankBadge");
+      badge.textContent = p.rank;
+      badge.className = "rank-badge tier-" + rankTier(p.rating);
+      el2("userRating").textContent = p.rating;
+      paintBadges(p);
+      el2("userAwards").onclick = () => showAwards(userId);
       el2("userSeen").textContent =
         (p.online ? "online now" : idleText(p.idle)) +
         (p.joined ? " · joined " + p.joined.slice(0, 10) : "");
       paintAvatar(el2("userAvatar"), p);
+
+      // Headline records. best_wpm is a decimal, and rounding a personal best
+      // down to a whole number loses the thing that makes it a record.
+      el2("recWpm").textContent = (Number(p.best_wpm) || 0).toFixed(2);
+      el2("recWon").textContent = (p.wins || 0).toLocaleString();
+      el2("recPlayed").textContent = (p.races || 0).toLocaleString();
+      paintDetails(p);
 
       const stats = [
         ["races", p.races],
@@ -2816,6 +2964,157 @@
       el2("userNoPosts").classList.toggle("hidden", (d.posts || []).length > 0);
     } catch (err) {
       el2("userPosts").innerHTML = '<p class="err">could not load that profile</p>';
+    }
+  }
+
+  /** Which badge colour a rating earns. Mirrors the ladder in rating.py. */
+  function rankTier(score) {
+    const n = Number(score) || 0;
+    if (n >= 2100) return "legend";
+    if (n >= 1650) return "gold";
+    if (n >= 1350) return "silver";
+    return "bronze";
+  }
+
+  /**
+   * Country, age and gender - whichever of them this player filled in. A field
+   * they left blank is left out entirely rather than shown as "unknown", so an
+   * empty row never reads as something withheld.
+   */
+  function paintDetails(p) {
+    const box = el2("userDetails");
+    if (!box) return;
+    const rows = [];
+    if (p.country) {
+      const flag = countryFlag(p.country);
+      rows.push(["Country", (flag ? flag + " " : "") + countryName(p.country)]);
+    }
+    if (p.age != null) rows.push(["Age", String(p.age)]);
+    if (p.gender) rows.push(["Gender", GENDER_LABELS[p.gender] || p.gender]);
+
+    box.innerHTML = "";
+    box.classList.toggle("hidden", rows.length === 0);
+    for (const [label, value] of rows) {
+      const item = document.createElement("div");
+      item.className = "detail";
+      item.innerHTML = "<span></span><b></b>";
+      item.querySelector("span").textContent = label;
+      item.querySelector("b").textContent = value;
+      box.appendChild(item);
+    }
+  }
+
+  /* ---------- achievements ---------- */
+  const TIER_ORDER = { legend: 0, gold: 1, silver: 2, bronze: 3 };
+
+  function awardCard(a) {
+    const card = document.createElement("div");
+    card.className =
+      "award tier-" + (a.tier || "bronze") + (a.earned ? " got" : " locked");
+    card.innerHTML =
+      '<span class="award-icon"></span>' +
+      '<span class="award-body">' +
+      '<b class="award-name"></b>' +
+      '<span class="award-blurb muted"></span>' +
+      '<span class="award-meta muted"></span>' +
+      '<span class="award-track hidden"><i></i></span>' +
+      "</span>";
+
+    card.querySelector(".award-icon").textContent = a.icon || "\u2b50";
+    card.querySelector(".award-name").textContent = a.name;
+    card.querySelector(".award-blurb").textContent = a.blurb;
+
+    // Rarity is the point of the page, so it leads on both halves.
+    const share =
+      a.share != null ? a.share.toFixed(1).replace(/\.0$/, "") + "% of players" : "";
+    const meta = card.querySelector(".award-meta");
+    meta.textContent = a.earned
+      ? share + (a.earned_at ? " \u00b7 earned " + String(a.earned_at).slice(0, 10) : "")
+      : share;
+
+    // Only a countable achievement has a bar; a one-off has nothing to show.
+    if (!a.earned && a.want) {
+      const track = card.querySelector(".award-track");
+      track.classList.remove("hidden");
+      const pct = Math.max(0, Math.min(100, (a.have / a.want) * 100));
+      track.querySelector("i").style.width = pct + "%";
+      track.title = a.have + " of " + a.want;
+      meta.textContent = (share ? share + " \u00b7 " : "") + a.have + " / " + a.want;
+    }
+    return card;
+  }
+
+  function sortAwards(rows) {
+    return rows.slice().sort((a, b) => {
+      const t = (TIER_ORDER[a.tier] ?? 9) - (TIER_ORDER[b.tier] ?? 9);
+      return t || (a.share || 0) - (b.share || 0);
+    });
+  }
+
+  async function loadAwards(userId) {
+    const got = el2("awardsGot");
+    const left = el2("awardsLeft");
+    if (!got || !left) return;
+    got.innerHTML = '<p class="muted">loading…</p>';
+    left.innerHTML = "";
+    try {
+      const qs = userId ? "?user=" + userId : "";
+      const res = await fetch("/api/achievements" + qs, { credentials: "same-origin" });
+      const d = await res.json();
+      const rows = d.achievements || [];
+      const earned = sortAwards(rows.filter((a) => a.earned));
+      const locked = sortAwards(rows.filter((a) => !a.earned));
+
+      got.innerHTML = "";
+      for (const a of earned) got.appendChild(awardCard(a));
+      left.innerHTML = "";
+      for (const a of locked) left.appendChild(awardCard(a));
+
+      el2("awardsEarned").textContent = d.earned || 0;
+      el2("awardsTotal").textContent = d.total || 0;
+      el2("awardsGotCount").textContent = earned.length ? earned.length + "" : "";
+      el2("awardsLeftCount").textContent = locked.length ? locked.length + "" : "";
+      el2("awardsNone").classList.toggle("hidden", earned.length > 0);
+      const pct = d.total ? (d.earned / d.total) * 100 : 0;
+      el2("awardsBar").style.width = pct + "%";
+      el2("awardsTitle").textContent =
+        d.me || !userId ? "Your achievements" : "Achievements";
+      el2("awardsSub").textContent = d.players
+        ? "Everything there is to earn. The percentage is how many of the " +
+          d.players + " players who have raced hold it."
+        : "Everything there is to earn.";
+    } catch (err) {
+      got.innerHTML = '<p class="err">could not load achievements</p>';
+    }
+  }
+
+  function showAwards(userId) {
+    screenOnly(el2("screen-awards"));
+    loadAwards(userId || 0);
+  }
+
+  /** The badge row under a name on a profile. */
+  function paintBadges(p) {
+    const box = el2("userBadges");
+    if (!box) return;
+    const rows = p.awards || [];
+    box.innerHTML = "";
+    box.classList.toggle("hidden", rows.length === 0);
+    for (const a of rows.slice(0, 12)) {
+      const chip = document.createElement("span");
+      chip.className = "badge-chip tier-" + (a.tier || "bronze");
+      chip.innerHTML = '<i></i><span></span>';
+      chip.querySelector("i").textContent = a.icon || "\u2b50";
+      chip.querySelector("span").textContent = a.name;
+      chip.title =
+        a.blurb + (a.earned_at ? " · earned " + String(a.earned_at).slice(0, 10) : "");
+      box.appendChild(chip);
+    }
+    if (rows.length > 12) {
+      const more = document.createElement("span");
+      more.className = "badge-chip more";
+      more.textContent = "+" + (rows.length - 12);
+      box.appendChild(more);
     }
   }
 
@@ -2909,6 +3208,8 @@
 
     const mode = r.duration ? r.duration + "s run" : "one snippet";
     const bits = [r.language, mode];
+    if (r.strict) bits.push("strict");
+    if (r.ranked === false) bits.push("unranked");
     if (r.levels && r.levels.length) bits.push(r.levels.join("/"));
     if (r.topics && r.topics.length) bits.push(r.topics.join("/"));
     row.querySelector(".lb-sub").textContent = bits.join(" \u00b7 ");
@@ -2917,7 +3218,11 @@
     state.textContent = r.state;
     state.className = "badge lb-state " + r.state;
 
-    const people = [r.humans + (r.humans === 1 ? " player" : " players")];
+    const people = [
+      r.limit
+        ? r.humans + "/" + r.limit + " players"
+        : r.humans + (r.humans === 1 ? " player" : " players"),
+    ];
     if (r.bots) people.push(r.bots + " bot" + (r.bots === 1 ? "" : "s"));
     if (r.watchers) people.push(r.watchers + " watching");
     const who = row.querySelector(".lb-people");
@@ -3047,6 +3352,9 @@
         private: priv ? "1" : "0",
         key: priv ? key : "",
         title: el2("newTitle").value.trim().slice(0, 40),
+        strict: el2("newStrict").checked ? "1" : "0",
+        ranked: el2("newRanked").checked ? "1" : "0",
+        limit: el2("newLimit").value || "0",
       });
       const res = await fetch("/api/lobby/new?" + qs);
       const d = await res.json();
@@ -3634,6 +3942,20 @@
   on(el2("feedBtn"), "click", showFeed);
   on(el2("playersBtn"), "click", showPlayers);
   on(el2("lobbiesBtn"), "click", showLobbies);
+  on(el2("awardsBtn"), "click", () => showAwards(0));
+  on(el2("pfViewPublic"), "click", () => {
+    closeProfile();
+    if (S.me) showUser(S.me.id);
+  });
+  on(el2("roomStrict"), "change", () =>
+    send({ t: "mode", strict: el2("roomStrict").checked })
+  );
+  on(el2("roomRanked"), "change", () =>
+    send({ t: "mode", ranked: el2("roomRanked").checked })
+  );
+  on(el2("roomLimit"), "change", () =>
+    send({ t: "mode", limit: parseInt(el2("roomLimit").value || "0", 10) })
+  );
   on(el2("backBtn"), "click", backToGame);
   on(el.resign, "click", giveUp);
   on(el2("newLobbyGo"), "click", createListedLobby);
