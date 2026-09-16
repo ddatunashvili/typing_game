@@ -130,6 +130,11 @@
     <h1>Type real code. Race your friends.</h1>
     <p class="sub">Pick a language, a level and the topics you want, then beat everyone to the last semicolon.</p>
 
+    <section class="panel hidden" id="lbPanel">
+      <h2>leaderboard <span class="muted">best wpm</span></h2>
+      <div id="leaderboard" class="lb"></div>
+    </section>
+
     <section class="panel">
       <h2>language</h2>
       <div id="langGrid" class="lang-grid"></div>
@@ -178,11 +183,6 @@
       <h2>challenge a bot <span class="muted">pick an opponent by rating</span></h2>
       <div id="botList" class="bot-list"></div>
     </section>
-
-    <section class="panel hidden" id="lbPanel">
-      <h2>leaderboard <span class="muted">best wpm</span></h2>
-      <div id="leaderboard" class="lb"></div>
-    </section>
   </div>
 </main>
 
@@ -204,11 +204,6 @@
       <p id="ranksEmpty" class="muted hidden">
         No rated races yet. Register and beat a bot to get on the board.
       </p>
-    </section>
-
-    <section class="panel">
-      <h2>bots <span class="muted">always available</span></h2>
-      <div id="ranksBots" class="ranks"></div>
     </section>
 
     <section class="panel">
@@ -362,6 +357,10 @@
             <span>strict typing</span>
           </label>
           <label class="tog">
+            <input id="newSuggest" type="checkbox" />
+            <span>suggestions</span>
+          </label>
+          <label class="tog">
             <input id="newRanked" type="checkbox" checked />
             <span>ranked</span>
           </label>
@@ -426,6 +425,7 @@
     </div>
 
     <section class="panel hero">
+      <div id="userCover" class="hero-cover hidden" aria-hidden="true"></div>
       <div class="hero-glow" aria-hidden="true"></div>
       <div class="user-head">
         <span id="userAvatar" class="avatar big"></span>
@@ -446,6 +446,19 @@
 
       <div id="userBadges" class="badges hidden"></div>
       <div id="userDetails" class="details hidden"></div>
+    </section>
+
+    <section class="panel" id="userAwardsPanel">
+      <h2>
+        achievements <span id="userAwardsCount" class="muted"></span>
+        <span class="head-actions">
+          <button id="userAwardsAll" class="ghost small" type="button">see all</button>
+        </span>
+      </h2>
+      <div id="userAwardsGrid" class="award-grid"></div>
+      <p id="userAwardsNone" class="muted hidden">
+        Nothing earned yet.
+      </p>
     </section>
 
     <section class="panel">
@@ -597,6 +610,42 @@
 <!-- one-line notices: a decline, an acceptance -->
 <div id="flashNote" class="flash-note hidden"></div>
 
+<!-- REPLAY -->
+<div id="replayModal" class="modal hidden">
+  <div class="modal-card replay-card">
+    <div class="modal-head">
+      <div>
+        <h3 id="rpTitle">Replay</h3>
+        <p id="rpSub" class="muted"></p>
+      </div>
+      <button id="rpClose" class="ghost" type="button">close</button>
+    </div>
+
+    <div class="hud rp-hud">
+      <div class="hud-item"><b id="rpWpm">0</b><span>wpm</span></div>
+      <div class="hud-item"><b id="rpAcc">100%</b><span>acc</span></div>
+      <div class="hud-item"><b id="rpTime">0.0s</b><span>time</span></div>
+      <div class="hud-item"><b id="rpErrors">0</b><span>misses</span></div>
+    </div>
+
+    <div id="rpBox" class="code-box replay-box">
+      <div id="rpGutter" class="gutter" aria-hidden="true"></div>
+      <pre id="rpArea" class="code-area"></pre>
+    </div>
+
+    <div class="rp-ctl">
+      <button id="rpPlay" class="accent" type="button">&#9654; play</button>
+      <button id="rpRestart" class="ghost" type="button">&#8634;</button>
+      <input id="rpScrub" type="range" min="0" max="1000" value="0" aria-label="Position" />
+      <span id="rpSpeed" class="rp-speed">
+        <button class="ghost on" data-speed="1" type="button">1&times;</button>
+        <button class="ghost" data-speed="2" type="button">2&times;</button>
+        <button class="ghost" data-speed="4" type="button">4&times;</button>
+      </span>
+    </div>
+  </div>
+</div>
+
 <!-- PRIVATE LOBBY KEY -->
 <div id="keyModal" class="modal hidden">
   <div class="modal-card">
@@ -682,6 +731,10 @@
             <span>strict &mdash; type the indentation yourself</span>
           </label>
           <label class="tog">
+            <input id="roomSuggest" type="checkbox" />
+            <span>suggestions &mdash; Tab completes keywords</span>
+          </label>
+          <label class="tog">
             <input id="roomRanked" type="checkbox" checked />
             <span>ranked &mdash; the result moves everyone's rating</span>
           </label>
@@ -707,6 +760,7 @@
         <div id="lineGlow" class="line-glow" aria-hidden="true"></div>
         <pre id="codeArea" class="code-area"></pre>
         <div id="ghosts" class="ghosts"></div>
+        <div id="suggest" class="suggest hidden" aria-live="polite"></div>
       </div>
       <input id="trap" class="trap" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
       <p id="hint" class="hint">click here and start typing — indentation is auto-skipped</p>
@@ -824,12 +878,61 @@
     </div>
 
     <div class="field">
+      <span>cover image <em class="muted">the banner across the top of your profile</em></span>
+
+      <div id="cvDrop" class="drop wide" tabindex="0" role="button"
+           aria-label="Choose or drop a cover image">
+        <input id="cvFile" class="drop-input" type="file"
+               accept="image/png,image/jpeg,image/gif,image/webp" />
+        <svg class="drop-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5" fill="none" stroke="currentColor"
+                stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+          <path d="M4 15v3a2 2 0 002 2h12a2 2 0 002-2v-3" fill="none" stroke="currentColor"
+                stroke-width="2" stroke-linecap="round" />
+        </svg>
+        <b>Drop a cover here</b>
+        <span class="muted">wide works best &mdash; png, jpeg, gif or webp, up to 1.5 MB</span>
+      </div>
+
+      <div id="cvCrop" class="crop wide hidden">
+        <div id="cvStage" class="crop-stage wide">
+          <canvas id="cvCanvas" width="960" height="270"></canvas>
+        </div>
+        <div class="crop-side">
+          <label class="crop-zoom">
+            <span class="muted">zoom</span>
+            <input id="cvZoom" type="range" min="100" max="300" value="100" />
+          </label>
+          <p class="muted">Drag the picture to reposition it.</p>
+          <div class="crop-ctl">
+            <button id="cvRecrop" class="ghost" type="button">choose another</button>
+          </div>
+        </div>
+      </div>
+
+      <button id="cvRemove" class="ghost hidden" type="button">remove cover</button>
+    </div>
+
+    <div class="field">
       <span>about you <em class="muted">optional, and shown on your public profile</em></span>
       <div class="about-grid">
-        <label class="field">
+        <div class="field">
           <span>country</span>
-          <select id="pfCountry" class="lang-select"></select>
-        </label>
+          <div class="combo" id="pfCountryCombo">
+            <input type="hidden" id="pfCountry" value="" />
+            <button type="button" class="combo-toggle" id="pfCountryToggle"
+                    aria-haspopup="listbox" aria-expanded="false">
+              <span class="combo-face"></span>
+              <span class="combo-caret" aria-hidden="true">&#9662;</span>
+            </button>
+            <div class="combo-pop hidden">
+              <input class="combo-search" type="text" autocomplete="off"
+                     placeholder="type a country&hellip;" aria-label="Search countries" />
+              <div class="combo-list" role="listbox"></div>
+              <p class="combo-empty muted hidden">No country matches that.</p>
+            </div>
+          </div>
+        </div>
         <label class="field">
           <span>year of birth</span>
           <select id="pfBirthYear" class="lang-select"></select>

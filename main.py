@@ -85,6 +85,21 @@ async def lifespan(_: FastAPI):
     await run_in_threadpool(library.seed)
     await run_in_threadpool(library.refresh, True)
     log.info("snippet library loaded from the %s", library.source())
+    # Every database call goes through run_in_threadpool, against a server that
+    # answers in ~170ms. The default pool is 40 threads; a burst of finishing
+    # races - persistence plus achievement checks is ~10 queries per player -
+    # filled it, and every other request queued behind them (the feed took
+    # 20 seconds during one such burst). More threads is the right fix for
+    # I/O-bound waits: each one is idle on a socket, not burning a core.
+    try:
+        import anyio.to_thread as _threads
+
+        limiter = _threads.current_default_thread_limiter()
+        before = limiter.total_tokens
+        limiter.total_tokens = max(before, env_int("THREAD_POOL", 120))
+        log.info("thread pool: %d -> %d", before, limiter.total_tokens)
+    except Exception as exc:  # anyio internals moved: keep the default
+        log.warning("could not resize the thread pool: %s", exc)
     keeper = asyncio.create_task(house_keeper())
     yield
     keeper.cancel()
@@ -210,6 +225,10 @@ class Player:
         self.gave_up = False
         self.place: Optional[int] = None
         self.time: Optional[float] = None
+        # Keystroke timeline, and the post it belongs to once that exists.
+        # Whichever of the two arrives second does the write.
+        self.replay: Optional[list] = None
+        self.post_id: Optional[int] = None
 
     def reset(self) -> None:
         self.ready = bool(self.bot)  # bots are always up for a race
@@ -226,6 +245,8 @@ class Player:
         self.gave_up = False
         self.place = None
         self.time = None
+        self.replay = None
+        self.post_id = None
 
     def public(self) -> dict:
         return {
@@ -267,6 +288,7 @@ class Lobby:
         title: str = "",
         strict: bool = False,
         ranked: bool = True,
+        suggest: bool = False,
         limit: int = 0,
         house: bool = False,
     ):
@@ -279,6 +301,8 @@ class Lobby:
         self.house = bool(house)
         # Strict: no auto-skipping of leading indentation, every space typed.
         self.strict = bool(strict)
+        # Suggestions: Tab completes the language keyword under the caret.
+        self.suggest = bool(suggest)
         # Unranked: the race is recorded in full, it just does not move Elo.
         self.ranked = bool(ranked)
         # A private lobby is hidden from the browser unless it has a key, in
@@ -376,6 +400,7 @@ class Lobby:
             "locked": bool(self.key),
             "strict": self.strict,
             "ranked": self.ranked,
+            "suggest": self.suggest,
             "limit": self.limit,
             "house": self.house,
             "host": host.name if host else "",
@@ -435,6 +460,7 @@ class Lobby:
             "title": self.title,
             "strict": self.strict,
             "ranked": self.ranked,
+            "suggest": self.suggest,
             "limit": self.limit,
             "house": self.house,
             "players": [p.public() for p in self.roster()],
@@ -757,6 +783,27 @@ class Lobby:
             if player.delta:
                 player.rating = rating.apply_delta(player.rating, player.delta)
 
+    def replay_codes(self) -> List[str]:
+        return [s.get("code", "") for s in self.playlist]
+
+    async def keep_replay(self, player: Player) -> None:
+        """Write the replay once both the timeline and the post exist."""
+        if not player.replay or not player.post_id or not player.uid:
+            return
+        events, player.replay = player.replay, None
+        try:
+            await run_in_threadpool(
+                db.save_replay,
+                player.post_id,
+                player.uid,
+                self.language,
+                self.replay_codes(),
+                events,
+                float(player.time or 0.0),
+            )
+        except Exception as exc:
+            log.warning("could not save replay for %s: %s", player.name, exc)
+
     async def persist(self, racers: List[Player]) -> None:
         """Write the race to the database and hand out anything it unlocked."""
         if not db.enabled():
@@ -790,7 +837,7 @@ class Lobby:
 
             # the same race also lands on their profile as a post
             try:
-                await run_in_threadpool(
+                player.post_id = await run_in_threadpool(
                     social.add_post,
                     player.uid,
                     self.language,
@@ -808,6 +855,7 @@ class Lobby:
                 )
             except Exception as exc:
                 log.warning("could not post race for %s: %s", player.name, exc)
+            await self.keep_replay(player)
 
             # Anything this result has just unlocked. Done after the race is
             # recorded, so the totals it reads already include this race.
@@ -1613,6 +1661,7 @@ async def api_new_lobby(
     title: str = "",
     strict: int = 0,
     ranked: int = 1,
+    suggest: int = 0,
     limit: int = 0,
 ):
     code = new_code()
@@ -1627,6 +1676,7 @@ async def api_new_lobby(
         title=title,
         strict=bool(strict),
         ranked=bool(ranked),
+        suggest=bool(suggest),
         limit=limit,
     )
     lobbies[code] = lobby
@@ -1810,6 +1860,17 @@ async def api_profile(request: Request):
     return {"user": user}
 
 
+@app.get("/api/replay/{post_id}")
+async def api_replay(post_id: int):
+    """One player's run, as a keystroke timeline plus the code it was typed on."""
+    if not db.enabled():
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    found = await run_in_threadpool(db.get_replay, post_id)
+    if found is None:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    return found
+
+
 @app.get("/api/achievements")
 async def api_achievements(request: Request, user: int = 0):
     """The whole catalogue, marked up for whoever is being looked at."""
@@ -1903,6 +1964,46 @@ async def api_clear_avatar(request: Request):
     return {"ok": True}
 
 
+@app.post("/api/cover")
+async def api_set_cover(request: Request, file: UploadFile = File(...)):
+    """Upload the profile banner. Same shape as the avatar upload."""
+    user = await current_user(request)
+    if user is None:
+        return JSONResponse({"error": "not_registered"}, status_code=401)
+
+    data = await file.read(db.COVER_MAX_BYTES + 1)
+    if not data:
+        return JSONResponse({"error": "empty_file"}, status_code=400)
+    if len(data) > db.COVER_MAX_BYTES:
+        return JSONResponse({"error": "too_large", "max": db.COVER_MAX_BYTES}, status_code=413)
+
+    mime = db.sniff_avatar(data)
+    if mime is None:
+        return JSONResponse({"error": "unsupported_type"}, status_code=415)
+
+    version = await run_in_threadpool(db.set_cover, int(user["id"]), data, mime)
+    return {"cover_version": version}
+
+
+@app.delete("/api/cover")
+async def api_clear_cover(request: Request):
+    user = await current_user(request)
+    if user is None:
+        return JSONResponse({"error": "not_registered"}, status_code=401)
+    await run_in_threadpool(db.clear_cover, int(user["id"]))
+    return {"ok": True}
+
+
+@app.get("/api/cover/{user_id}")
+async def api_get_cover(user_id: int):
+    """The banner, or 404 - a profile without one draws its own gradient."""
+    found = await run_in_threadpool(db.get_cover, user_id) if db.enabled() else None
+    if found is None:
+        return Response(status_code=404)
+    data, mime = found
+    return Response(content=data, media_type=mime, headers=CACHE_WEEK)
+
+
 @app.get("/api/avatar/{user_id}")
 async def api_get_avatar(user_id: int):
     """The uploaded image, or a generated identicon so nobody is faceless."""
@@ -1966,7 +2067,7 @@ async def api_race(request: Request):
         0,  # solo has no opponent, so the rating does not move
     )
     try:
-        await run_in_threadpool(
+        post_id = await run_in_threadpool(
             social.add_post,
             int(user["id"]),
             language,
@@ -1982,6 +2083,17 @@ async def api_race(request: Request):
             "",
             "solo",
         )
+        snippets = body.get("snippets")
+        if post_id and isinstance(body.get("replay"), list) and isinstance(snippets, list):
+            await run_in_threadpool(
+                db.save_replay,
+                int(post_id),
+                int(user["id"]),
+                language,
+                snippets,
+                body.get("replay"),
+                seconds,
+            )
     except Exception as exc:
         log.warning("could not post solo run: %s", exc)
     try:
@@ -2083,6 +2195,7 @@ async def ws_lobby(
     title: str = Query(""),
     strict: int = Query(0),
     ranked: int = Query(1),
+    suggest: int = Query(0),
     limit: int = Query(0),
 ):
     code = code.upper()
@@ -2105,6 +2218,7 @@ async def ws_lobby(
             title=title,
             strict=bool(strict),
             ranked=bool(ranked),
+            suggest=bool(suggest),
             limit=limit,
         )
         lobbies[code] = lobby
@@ -2320,6 +2434,8 @@ async def ws_lobby(
                     lobby.strict = bool(msg.get("strict"))
                 if "ranked" in msg:
                     lobby.ranked = bool(msg.get("ranked"))
+                if "suggest" in msg:
+                    lobby.suggest = bool(msg.get("suggest"))
                 if "limit" in msg:
                     try:
                         lobby.limit = max(0, min(32, int(msg.get("limit") or 0)))
@@ -2327,9 +2443,10 @@ async def ws_lobby(
                         pass
                 await lobby.push_state()
                 await lobby.system(
-                    "%s · %s"
+                    "%s · %s · %s"
                     % (
                         "strict typing" if lobby.strict else "indentation auto-skipped",
+                        "suggestions on" if lobby.suggest else "no suggestions",
                         "ranked" if lobby.ranked else "unranked",
                     )
                 )
@@ -2378,8 +2495,16 @@ async def ws_lobby(
                 if pid == lobby.host and lobby.state in ("waiting", "finished"):
                     await lobby.start_race()
 
+            elif kind == "replay":
+                # The timeline on its own: sent when the clock ended the race
+                # or the player gave up, so nothing else carried it.
+                player.replay = db.clean_replay(msg.get("events"))
+                await lobby.keep_replay(player)
+
             elif kind == "resign":
                 # Give up: stop typing, hand the race to whoever is left.
+                if isinstance(msg.get("replay"), list):
+                    player.replay = db.clean_replay(msg.get("replay"))
                 await lobby.resign(player)
 
             elif kind == "progress":
@@ -2417,6 +2542,8 @@ async def ws_lobby(
                 player.time = max(0.0, float(msg.get("time", 0)))
                 player.chars = max(0, min(2_000_000, int(msg.get("chars", player.chars))))
                 player.snips = max(0, min(len(lobby.playlist), int(msg.get("snips", player.snips))))
+                if isinstance(msg.get("replay"), list):
+                    player.replay = db.clean_replay(msg.get("replay"))
                 lobby.finish_count += 1
                 player.place = lobby.finish_count
                 if lobby.duration > 0:
@@ -2514,9 +2641,163 @@ def render_index() -> str:
     return str(_index_cache["html"])
 
 
+# ---------- pages ----------
+# Every screen has a URL of its own. The same shell is served for all of them,
+# but with that page's title, description and canonical written into <head>,
+# so a crawler, a link preview and the browser tab all see the page it is - not
+# "CodeRace" five times over. The client reads the path and opens the screen.
+import html as _html
+
+PAGES = {
+    "/": (
+        "CodeRace — type real code, race your friends",
+        "A multiplayer typing game for real code. 15 languages, 4 difficulty levels, "
+        "topic filters, timed races and bot opponents with ratings. Free, no install.",
+    ),
+    "/lobbies": (
+        "Lobbies — CodeRace",
+        "Open rooms you can join right now, public and private. Ten house lobbies are "
+        "always up, in a different language and level each.",
+    ),
+    "/players": (
+        "Find players — CodeRace",
+        "Who is online now on CodeRace. Challenge anyone to a race and the invitation "
+        "lands on their screen the moment you click.",
+    ),
+    "/feed": (
+        "Race feed — CodeRace",
+        "Every race as it happens: speed, accuracy, language and placing, with "
+        "reactions, comments and watchable replays.",
+    ),
+    "/rankings": (
+        "Rankings — CodeRace",
+        "The rated ladder, from Rubber Duck to Kernel Hacker. Elo from real races "
+        "between real players; bots and solo runs never move it.",
+    ),
+    "/awards": (
+        "Achievements — CodeRace",
+        "37 achievements across four tiers, and how rare each one is among the "
+        "players who have raced.",
+    ),
+    "/snippets": (
+        "Your snippets — CodeRace",
+        "Add code of your own to the library. Public snippets join everyone's "
+        "races; private ones stay yours.",
+    ),
+}
+
+
+def _page_html(path: str, title: str, description: str, extra: str = "") -> str:
+    """The shell with this page's <head> written in."""
+    page = render_index()
+    canon = SITE_URL + (path if path != "/" else "/")
+    t = _html.escape(title, quote=True)
+    d = _html.escape(description, quote=True)
+    page = page.replace(
+        "<title>CodeRace — type real code, race your friends</title>",
+        "<title>%s</title>" % t,
+        1,
+    )
+    page = page.replace(
+        '<link rel="canonical" href="%s/" />' % SITE_URL,
+        '<link rel="canonical" href="%s" />' % _html.escape(canon, quote=True),
+        1,
+    )
+    for attr in ('name="description"', 'property="og:description"', 'name="twitter:description"'):
+        start = page.find(attr)
+        if start < 0:
+            continue
+        c0 = page.find('content="', start) + len('content="')
+        c1 = page.find('"', c0)
+        page = page[:c0] + d + page[c1:]
+    for attr in ('property="og:title"', 'name="twitter:title"'):
+        start = page.find(attr)
+        if start < 0:
+            continue
+        c0 = page.find('content="', start) + len('content="')
+        c1 = page.find('"', c0)
+        page = page[:c0] + t + page[c1:]
+    page = page.replace(
+        '<meta property="og:url" content="%s/" />' % SITE_URL,
+        '<meta property="og:url" content="%s" />' % _html.escape(canon, quote=True),
+        1,
+    )
+    if extra:
+        page = page.replace("</head>", extra + "\n</head>", 1)
+    return page
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    return HTMLResponse(render_index())
+    title, desc = PAGES["/"]
+    return HTMLResponse(_page_html("/", title, desc))
+
+
+@app.get("/lobbies", response_class=HTMLResponse)
+@app.get("/players", response_class=HTMLResponse)
+@app.get("/feed", response_class=HTMLResponse)
+@app.get("/rankings", response_class=HTMLResponse)
+@app.get("/awards", response_class=HTMLResponse)
+@app.get("/snippets", response_class=HTMLResponse)
+async def page(request: Request):
+    path = request.url.path.rstrip("/") or "/"
+    title, desc = PAGES.get(path, PAGES["/"])
+    return HTMLResponse(_page_html(path, title, desc))
+
+
+@app.get("/race/{code}", response_class=HTMLResponse)
+async def race_page(code: str):
+    """A lobby link. Ephemeral, so it asks not to be indexed."""
+    title = "Lobby %s — CodeRace" % _html.escape(code.upper()[:8])
+    desc = "Join this CodeRace lobby and race whoever is in it."
+    return HTMLResponse(
+        _page_html("/race/" + code.upper()[:8], title, desc,
+                   '<meta name="robots" content="noindex" />')
+    )
+
+
+@app.get("/profile/{user_id}", response_class=HTMLResponse)
+async def profile_page(user_id: int):
+    """A public profile, with enough written into the page for a crawler.
+
+    The client fills the screen in, but a crawler - or a link preview - never
+    runs it, so the name, rank and the three records go into the title, the
+    description and a Person block a search engine can read as data.
+    """
+    prof = await run_in_threadpool(social.profile, user_id) if db.enabled() else None
+    if prof is None:
+        return HTMLResponse(
+            _page_html("/profile/%d" % user_id, "Player not found — CodeRace",
+                       "There is no CodeRace player with that id.",
+                       '<meta name="robots" content="noindex" />'),
+            status_code=404,
+        )
+    name = prof["name"]
+    title = "%s — %s, %d rating — CodeRace" % (name, prof["rank"], prof["rating"])
+    desc = "%s on CodeRace: %s at %d rating. Best %.0f wpm, %d wins in %d races." % (
+        name, prof["rank"], prof["rating"], prof["best_wpm"], prof["wins"], prof["races"],
+    )
+    ld = json.dumps({
+        "@context": "https://schema.org",
+        "@type": "ProfilePage",
+        "url": "%s/profile/%d" % (SITE_URL, user_id),
+        "mainEntity": {
+            "@type": "Person",
+            "name": name,
+            "identifier": str(user_id),
+            "image": "%s/api/avatar/%d" % (SITE_URL, user_id),
+            "description": desc,
+        },
+    })
+    extra = '<script type="application/ld+json">%s</script>' % ld
+    # a crawler that runs no script still sees the substance
+    extra += (
+        '<noscript><div style="padding:24px;font-family:sans-serif">'
+        "<h1>%s</h1><p>%s</p>"
+        "<p>Highest WPM: %.2f &middot; Games won: %d &middot; Games played: %d</p>"
+        "</div></noscript>"
+    ) % (_html.escape(name), _html.escape(desc), prof["best_wpm"], prof["wins"], prof["races"])
+    return HTMLResponse(_page_html("/profile/%d" % user_id, title, desc, extra))
 
 
 @app.get("/manifest.webmanifest")
@@ -2555,6 +2836,7 @@ async def robots():
         "Allow: /",
         # lobby URLs are ephemeral and per-game; keep them out of the index
         "Disallow: /api/",
+        "Disallow: /race/",
         "Disallow: /?l=",
         "",
         f"Sitemap: {SITE_URL}/sitemap.xml",
@@ -2565,19 +2847,37 @@ async def robots():
 
 @app.get("/sitemap.xml")
 async def sitemap():
+    """Every page, plus the profile of everyone who has raced."""
     today = time.strftime("%Y-%m-%d")
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
-        "  <url>",
-        f"    <loc>{SITE_URL}/</loc>",
-        f"    <lastmod>{today}</lastmod>",
-        "    <changefreq>weekly</changefreq>",
-        "    <priority>1.0</priority>",
-        "  </url>",
-        "</urlset>",
-        "",
     ]
+
+    def url(loc, freq, prio):
+        lines.extend([
+            "  <url>",
+            f"    <loc>{loc}</loc>",
+            f"    <lastmod>{today}</lastmod>",
+            f"    <changefreq>{freq}</changefreq>",
+            f"    <priority>{prio}</priority>",
+            "  </url>",
+        ])
+
+    url(SITE_URL + "/", "daily", "1.0")
+    for path in ("/lobbies", "/players", "/feed", "/rankings", "/awards"):
+        url(SITE_URL + path, "hourly" if path in ("/feed", "/lobbies") else "daily", "0.8")
+    if db.enabled():
+        try:
+            rows = await run_in_threadpool(
+                db.query,
+                "SELECT id FROM cr_users WHERE races > 0 ORDER BY rating DESC LIMIT 5000",
+            )
+        except Exception:
+            rows = []
+        for r in rows:
+            url("%s/profile/%d" % (SITE_URL, int(r["id"])), "weekly", "0.5")
+    lines.extend(["</urlset>", ""])
     return Response(content="\n".join(lines), media_type="application/xml")
 
 

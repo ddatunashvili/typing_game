@@ -27,6 +27,9 @@ except ImportError:  # driver missing: accounts stay off
 log = logging.getLogger("coderace.db")
 
 AVATAR_MAX_BYTES = 512 * 1024
+# A cover is a wide banner rather than a 256px circle, so it gets more room -
+# still small enough that a row with one on it is cheap to read.
+COVER_MAX_BYTES = 1536 * 1024
 AVATAR_TYPES = {
     b"\x89PNG\r\n\x1a\n": "image/png",
     b"\xff\xd8\xff": "image/jpeg",
@@ -167,6 +170,9 @@ SCHEMA = (
         avatar_mime VARCHAR(40) NULL,
         avatar_data MEDIUMBLOB NULL,
         avatar_version INT UNSIGNED NOT NULL DEFAULT 0,
+        cover_mime VARCHAR(40) NULL,
+        cover_data MEDIUMBLOB NULL,
+        cover_version INT UNSIGNED NOT NULL DEFAULT 0,
         races INT UNSIGNED NOT NULL DEFAULT 0,
         best_wpm DECIMAL(6,1) NOT NULL DEFAULT 0,
         best_acc DECIMAL(5,1) NOT NULL DEFAULT 0,
@@ -353,6 +359,25 @@ SCHEMA = (
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """
+    CREATE TABLE IF NOT EXISTS cr_replays (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        post_id BIGINT UNSIGNED NOT NULL,
+        user_id INT UNSIGNED NOT NULL,
+        language VARCHAR(20) NOT NULL DEFAULT '',
+        snippets MEDIUMTEXT NOT NULL,
+        events MEDIUMTEXT NOT NULL,
+        seconds DECIMAL(7,2) NOT NULL DEFAULT 0,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        UNIQUE KEY uniq_cr_replay_post (post_id),
+        KEY idx_cr_replays_user (user_id),
+        CONSTRAINT fk_cr_replay_post FOREIGN KEY (post_id)
+            REFERENCES cr_posts (id) ON DELETE CASCADE,
+        CONSTRAINT fk_cr_replay_user FOREIGN KEY (user_id)
+            REFERENCES cr_users (id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
     CREATE TABLE IF NOT EXISTS cr_races (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
         user_id INT UNSIGNED NOT NULL,
@@ -394,6 +419,10 @@ MIGRATIONS = (
     ("cr_users", "birth_year",
      "ALTER TABLE cr_users ADD COLUMN birth_year SMALLINT UNSIGNED NULL"),
     ("cr_users", "gender", "ALTER TABLE cr_users ADD COLUMN gender VARCHAR(12) NULL"),
+    ("cr_users", "cover_mime", "ALTER TABLE cr_users ADD COLUMN cover_mime VARCHAR(40) NULL"),
+    ("cr_users", "cover_data", "ALTER TABLE cr_users ADD COLUMN cover_data MEDIUMBLOB NULL"),
+    ("cr_users", "cover_version",
+     "ALTER TABLE cr_users ADD COLUMN cover_version INT UNSIGNED NOT NULL DEFAULT 0"),
 )
 
 
@@ -568,6 +597,8 @@ def public_user(row: dict) -> dict:
         "name": row["name"],
         # avatar is a cache-busting version; 0 means no image uploaded
         "avatar": int(row.get("avatar_version") or 0) if row.get("avatar_mime") else 0,
+        # same for the profile banner, which most players will not have set
+        "cover": int(row.get("cover_version") or 0) if row.get("cover_mime") else 0,
         "races": int(row.get("races") or 0),
         "best_wpm": float(row.get("best_wpm") or 0),
         "best_acc": float(row.get("best_acc") or 0),
@@ -593,7 +624,7 @@ def find_by_token(token: str) -> Optional[dict]:
         """
         SELECT u.id, u.name, u.avatar_mime, u.avatar_version, u.races,
                u.best_wpm, u.best_acc, u.rating, u.wins, u.stars, u.settings,
-               u.country, u.birth_year, u.gender
+               u.country, u.birth_year, u.gender, u.cover_mime, u.cover_version
         FROM cr_tokens AS t
         JOIN cr_users AS u ON u.id = t.user_id
         WHERE t.token = %s
@@ -609,7 +640,8 @@ def find_by_token(token: str) -> Optional[dict]:
     return _one(
         """
         SELECT id, name, avatar_mime, avatar_version, races, best_wpm, best_acc,
-               rating, wins, stars, settings, country, birth_year, gender
+               rating, wins, stars, settings, country, birth_year, gender,
+               cover_mime, cover_version
         FROM cr_users WHERE token = %s
         """,
         (hashed,),
@@ -710,6 +742,43 @@ def clear_avatar(user_id: int) -> None:
     )
 
 
+def set_cover(user_id: int, data: bytes, mime: str) -> int:
+    """Store the profile banner. Returns the new version, for cache busting."""
+    _exec(
+        """
+        UPDATE cr_users
+        SET cover_data = %s, cover_mime = %s, cover_version = cover_version + 1
+        WHERE id = %s
+        """,
+        (data, mime, user_id),
+    )
+    row = _one("SELECT cover_version FROM cr_users WHERE id = %s", (user_id,))
+    return int((row or {}).get("cover_version") or 0)
+
+
+def clear_cover(user_id: int) -> None:
+    # The version still moves, so a cached banner is dropped rather than left
+    # on screen after it has been taken down.
+    _exec(
+        """
+        UPDATE cr_users
+        SET cover_data = NULL, cover_mime = NULL, cover_version = cover_version + 1
+        WHERE id = %s
+        """,
+        (user_id,),
+    )
+
+
+def get_cover(user_id: int) -> Optional[Tuple[bytes, str]]:
+    row = _one(
+        "SELECT cover_data, cover_mime FROM cr_users WHERE id = %s",
+        (user_id,),
+    )
+    if not row or not row.get("cover_data") or not row.get("cover_mime"):
+        return None
+    return bytes(row["cover_data"]), str(row["cover_mime"])
+
+
 def get_avatar(user_id: int) -> Optional[Tuple[bytes, str]]:
     row = _one(
         "SELECT avatar_data, avatar_mime FROM cr_users WHERE id = %s",
@@ -795,6 +864,100 @@ def details_of(row: Optional[dict]) -> Dict[str, Any]:
         "birth_year": clean_birth_year(row.get("birth_year")),
         "age": age_from(row.get("birth_year")),
         "gender": clean_gender(row.get("gender")),
+    }
+
+
+# ---------- replays ----------
+# A replay is the keystroke timeline of one player's run: a flat list of
+# [ms, pos, idx, flag] rows, where flag is 0 for a correct key, 1 for a miss
+# and 2 for a backspace. Small - a few KB - so it is stored for every race
+# rather than only the memorable ones. The snippets are stored with it: the
+# library changes, and a replay against a snippet that has since been edited
+# would play back nonsense.
+REPLAY_MAX_EVENTS = 20000
+REPLAY_MAX_BYTES = 400 * 1024
+
+
+def clean_replay(events: Any) -> Optional[list]:
+    """Only well-formed rows, in order, capped. None if there is nothing usable."""
+    if not isinstance(events, list) or not events:
+        return None
+    out = []
+    last = -1
+    for row in events[:REPLAY_MAX_EVENTS]:
+        if not isinstance(row, (list, tuple)) or len(row) < 3:
+            continue
+        try:
+            ms, pos, idx = int(row[0]), int(row[1]), int(row[2])
+            flag = int(row[3]) if len(row) > 3 else 0
+        except (TypeError, ValueError):
+            continue
+        if ms < 0 or ms < last or pos < 0 or idx < 0 or flag not in (0, 1, 2):
+            continue
+        last = ms
+        out.append([ms, pos, idx, flag])
+    return out or None
+
+
+def save_replay(
+    post_id: int,
+    user_id: int,
+    language: str,
+    snippets: Any,
+    events: Any,
+    seconds: float,
+) -> bool:
+    rows = clean_replay(events)
+    if rows is None:
+        return False
+    if not isinstance(snippets, list) or not all(isinstance(x, str) for x in snippets):
+        return False
+    packed = json.dumps(rows, separators=(",", ":"))
+    codes = json.dumps(snippets[:64])
+    if len(packed) > REPLAY_MAX_BYTES or len(codes) > REPLAY_MAX_BYTES:
+        return False
+    _exec(
+        "INSERT INTO cr_replays (post_id, user_id, language, snippets, events, seconds) "
+        "VALUES (%s, %s, %s, %s, %s, %s) "
+        "ON DUPLICATE KEY UPDATE events = VALUES(events), snippets = VALUES(snippets), "
+        "seconds = VALUES(seconds)",
+        (post_id, user_id, (language or "")[:20], codes, packed, round(float(seconds), 2)),
+    )
+    return True
+
+
+def get_replay(post_id: int) -> Optional[dict]:
+    row = _one(
+        "SELECT r.id, r.post_id, r.user_id, r.language, r.snippets, r.events, r.seconds, "
+        "r.created_at, p.wpm, p.acc, p.place, p.stars, p.kind, u.name "
+        "FROM cr_replays AS r "
+        "JOIN cr_posts AS p ON p.id = r.post_id "
+        "JOIN cr_users AS u ON u.id = r.user_id "
+        "WHERE r.post_id = %s",
+        (post_id,),
+    )
+    if row is None:
+        return None
+    try:
+        snippets = json.loads(row["snippets"])
+        events = json.loads(row["events"])
+    except (TypeError, ValueError):
+        return None
+    return {
+        "id": int(row["id"]),
+        "post_id": int(row["post_id"]),
+        "user_id": int(row["user_id"]),
+        "name": row["name"],
+        "language": row["language"],
+        "snippets": snippets,
+        "events": events,
+        "seconds": float(row.get("seconds") or 0),
+        "wpm": float(row.get("wpm") or 0),
+        "acc": float(row.get("acc") or 0),
+        "place": row.get("place"),
+        "stars": int(row.get("stars") or 0),
+        "kind": row.get("kind") or "race",
+        "created_at": str(row.get("created_at") or ""),
     }
 
 

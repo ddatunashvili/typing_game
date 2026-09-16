@@ -137,6 +137,10 @@ UPDATE cr_snippets SET output = '>>> square(7)
 
 ## Bots
 
+Bots are not on the rankings board. They have a fixed rating that never moves,
+so listing them among people pushed every real player down a ladder they could
+not climb. The roster stays on the home page, as something to pick.
+
 Thirteen bot opponents from **Rubber Duck** (750, 18 wpm) to **Kernel Panic Kim**
 (2250, 138 wpm), each with a rating and a target speed. They type at their target wpm with
 jitter and occasional hesitations rather than at a flat rate.
@@ -182,6 +186,60 @@ anyone else: the racers still typing keep claiming the real finishing places, an
 resigned is slotted in behind them when the race closes, with no stars and the rating hit
 that last place earns.
 
+## Replays
+
+Every race is recorded: each accepted key, miss and backspace as a
+`[ms, pos, idx, flag]` row against the moment the race armed - a few KB per
+run. The timeline goes up with the result, lobby or solo, and is stored with
+the snippets it was typed on, because the library changes and a replay against
+an edited snippet would play back nonsense.
+
+A post with a replay has a **▶ replay** button. The player animates the run
+onto its own copy of the code area - line numbers, guides, misses in red - with
+play/pause, a scrubber and 1×/2×/4× speed, and a live WPM and accuracy readout
+worked out from the keystrokes themselves. Watching one never touches a race
+you might be in the middle of.
+
+Not screen recording: a browser will not do that without a permission prompt
+and an on-screen indicator, by design. This is the keystroke timeline, which
+is what a typing replay actually is.
+
+## Pages and URLs
+
+Every screen is a page with a URL of its own - `/lobbies`, `/players`,
+`/feed`, `/rankings`, `/awards`, `/snippets`, `/profile/{id}`, `/race/{code}` -
+served with that page's title, description and canonical written into `<head>`
+so a crawler, a link preview and the browser tab all see the page it is. The
+client reads the path on load and opens the screen, pushes a URL on every
+navigation, and the browser's back button walks them. Profiles carry a
+`ProfilePage`/`Person` JSON-LD block and a `<noscript>` summary of the name,
+rank and records, so a crawler that runs no script still reads the substance.
+The sitemap lists every page plus the profile of everyone who has raced; lobby
+links are `noindex` and disallowed, since a lobby is gone within the hour.
+
+The old `/?l=CODE` invite links still work and forward to `/race/CODE`.
+
+## Tab and suggestions
+
+**Tab** clears the indentation ahead of the caret, whatever the lobby is set
+to: the whole run in a normal lobby, one level per press in a strict one. It
+used to type a literal tab character, which only matched tab-indented
+snippets - on a space-indented one the indent key scored an error.
+
+**Suggestions** is a lobby option. The snippet is fixed, so a suggestion can
+only ever be the word the snippet already has at the caret: when that word is
+a keyword or builtin of the language and you are partway into it, a small
+`⇥ def` hint appears under the caret and Tab types the rest. The keyword list
+comes from the Prism grammar doing the highlighting, so it matches what is on
+screen rather than a second list that would drift. A speed aid, not free text.
+
+## Cover images
+
+A profile can carry a banner across the top of its header, uploaded and
+cropped in the profile dialog at a 32:9 frame with zoom and drag, the same way
+the avatar is. Up to 1.5 MB, stored as webp, faded into the panel at the bottom
+so the name and badges stay readable whatever the picture.
+
 ## Joining a race in progress
 
 Walking into a lobby mid-race puts you straight in it, from the top of the
@@ -203,6 +261,8 @@ Set when the lobby is opened, and changeable by the host until the race starts:
   feed post) but nobody's rating moves.
 - **Player limit** - 2 to 12 racers, or none. Spectators never take a seat, so
   a full lobby can still be watched.
+- **Suggestions** - Tab completes the language keyword under the caret. See
+  *Tab and suggestions*.
 
 Ratings also stay put when a race was not a contest between rated players:
 solo runs, and a lobby where the only opposition was bots. A bot types at a
@@ -225,14 +285,19 @@ won even if the rule behind it later moves.
 
 The **Awards** page splits them into earned and still to earn. Each card shows
 the share of players who have ever raced that hold it, and a countable one
-shows how far along you are. A player's rarest badges appear on their profile
-under their name, and the rank badge next to it is coloured by rating band.
+shows how far along you are. An earned card is lit - its tier colour washes
+the card, the icon glows, a sheen crosses it once on load, and the legend tier
+pulses - and a locked one is the same card with the light off. A profile shows
+every achievement its owner holds, lit, with a count out of the total, and the
+rarest ones as chips under the name; the rank badge next to it is coloured by
+rating band.
 
 ## Profiles
 
 A profile leads with the three records - highest WPM, games won, games played -
 then the badges, then whatever optional details that player chose to publish:
-country (with its flag), age and gender. All three are optional and unset by
+country (with a real flag image - Windows renders the emoji flag as two
+letters - picked from a searchable list), age and gender. All three are optional and unset by
 default, and a field left blank is not shown at all rather than rendered as
 "unknown". Age is stored as a year of birth and worked out on read, so it never
 goes stale.
@@ -395,6 +460,7 @@ layout does not jump when one appears.
 | --- | --- |
 | `main.py` | FastAPI app, lobby state machine, `/ws/{code}` websocket, REST API |
 | `achievements.py` | the achievement catalogue, awarding, and how rare each one is |
+| `cr_replays` | one row per recorded run: the timeline and the snippets it was typed on |
 | `snippets.py` | seed snippet library, tagged by language / level / topic |
 | `packs/` | per-language snippet packs; drop in a module and it is picked up |
 | `library.py` | reads snippets and settings from MySQL, falls back to the seed file |
@@ -448,6 +514,10 @@ Accounts (all no-ops when no database is configured):
   published details; a missing or unusable value clears that field
 - `GET /api/achievements?user=` — the whole catalogue, marked with what that player holds,
   how rare each one is, and how far along the countable ones are
+- `POST /api/cover` (multipart `file`), `DELETE /api/cover`, `GET /api/cover/{user_id}` —
+  the profile banner; 404 when there is none
+- `GET /api/replay/{post_id}` — a run as a keystroke timeline plus the snippets it was typed
+  on; `POST /api/race` accepts `replay` and `snippets` for a solo run
 
 Social:
 
@@ -469,8 +539,10 @@ Websocket `WS /ws/{code}?name=&pid=&create=0|1&lang=&levels=&topics=&duration=`
 `&spectate=0|1&key=&private=0|1&title=`
 
 Client → server: `chat`, `ready`, `start`, `restart`, `again`, `lang`, `filters`,
-`duration`, `mode`, `bot`, `unbot`, `progress`, `finish`, `resign` — `mode` sets
-`strict`, `ranked` and `limit` (host only, before the start), `again` swaps the snippet,
+`duration`, `mode`, `bot`, `unbot`, `progress`, `finish`, `resign`, `replay` — `mode`
+sets `strict`, `ranked`, `suggest` and `limit` (host only, before the start); `finish` and
+`resign` carry the keystroke timeline as `replay`, and `replay` sends it on its own when the
+clock ended the race; `again` swaps the snippet,
 `restart` starts another race, `bot`/`unbot` seat and remove a bot (host only), `resign`
 gives up without ending the race. With `spectate=1` the connection watches instead of
 racing and only `chat` is accepted from it.

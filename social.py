@@ -144,7 +144,8 @@ POST_COLUMNS = (
     "p.seconds, p.place, p.stars, p.rating_delta, p.opponents, p.body, "
     "p.likes, p.dislikes, p.comment_count, p.created_at, "
     "u.name AS author_name, u.avatar_mime, u.avatar_version, "
-    "u.rating AS author_rating"
+    "u.rating AS author_rating, "
+    "(SELECT r.id FROM cr_replays AS r WHERE r.post_id = p.id LIMIT 1) AS replay_id"
 )
 
 
@@ -176,6 +177,7 @@ def public_post(row: dict, viewer_id: Optional[int] = None) -> dict:
         "comments": int(row.get("comment_count") or 0),
         "mine": viewer_id is not None and int(row["user_id"]) == viewer_id,
         "my_reaction": int(row.get("my_reaction") or 0),
+        "replay_id": int(row["replay_id"]) if row.get("replay_id") else 0,
         "created_at": str(row.get("created_at") or ""),
     }
 
@@ -445,8 +447,9 @@ def _idle_seconds(row: dict) -> int:
 
 def profile(user_id: int) -> Optional[dict]:
     row = db.one(
-        "SELECT id, name, avatar_mime, avatar_version, races, best_wpm, best_acc, "
-        "rating, wins, stars, country, birth_year, gender, created_at, last_seen_at, "
+        "SELECT id, name, avatar_mime, avatar_version, cover_mime, cover_version, "
+        "races, best_wpm, best_acc, rating, wins, stars, country, birth_year, gender, "
+        "created_at, last_seen_at, "
         "TIMESTAMPDIFF(SECOND, last_seen_at, NOW()) AS idle "
         "FROM cr_users WHERE id = %s",
         (user_id,),
@@ -462,11 +465,14 @@ def profile(user_id: int) -> Optional[dict]:
     # whatever this player chose to publish about themselves; any of these may
     # be None, which the profile renders as an absent row rather than a blank one
     out.update(db.details_of(row))
-    # the badges shown under the name; rarest first, so the best one leads
+    # The achievements this player holds, rarest first so the best one leads.
+    # The total comes along so the profile can say "9 of 37" without a second
+    # request for a number it already knows.
     try:
         out["awards"] = achievements.for_user(user_id)
     except Exception:
         out["awards"] = []
+    out["awards_total"] = len(achievements.CATALOGUE)
 
     extra = db.one(
         "SELECT COUNT(*) AS races, COALESCE(AVG(wpm), 0) AS avg_wpm, "

@@ -81,12 +81,18 @@
     pfStage: $("pfStage"),
     pfCanvas: $("pfCanvas"),
     pfZoom: $("pfZoom"),
+    cvDrop: $("cvDrop"),
+    cvFile: $("cvFile"),
+    cvCrop: $("cvCrop"),
+    cvStage: $("cvStage"),
+    cvCanvas: $("cvCanvas"),
+    cvZoom: $("cvZoom"),
+    cvRemove: $("cvRemove"),
     pfRecrop: $("pfRecrop"),
     ranksBtn: $("ranksBtn"),
     ranksBack: $("ranksBack"),
     ranks: $("screen-ranks"),
     ranksTable: $("ranksTable"),
-    ranksBots: $("ranksBots"),
     ranksLadder: $("ranksLadder"),
     ranksCount: $("ranksCount"),
     ranksEmpty: $("ranksEmpty"),
@@ -104,6 +110,7 @@
     gutter: $("gutter"),
     lineGlow: $("lineGlow"),
     resign: $("resignBtn"),
+    suggest: $("suggest"),
     winModal: $("winModal"),
     winStars: $("winStars"),
     winTitle: $("winTitle"),
@@ -185,6 +192,161 @@
   }
 
   const GENDER_LABELS = { male: "Male", female: "Female", other: "Other" };
+
+  /**
+   * A flag image for a country code.
+   *
+   * The emoji flag is one string and no network, but Windows has never shipped
+   * a font that renders a regional-indicator pair, so there it comes out as two
+   * letters in a box. These are real images, with the emoji put back if the
+   * request fails - so an offline or blocked browser still shows something.
+   */
+  function flagNode(code, size) {
+    const wrap = document.createElement("span");
+    wrap.className = "flag";
+    if (!code) return wrap;
+    const low = code.toLowerCase();
+    const h = size || 18;
+    const w = Math.round((h * 4) / 3);
+    const img = document.createElement("img");
+    img.width = w;
+    img.height = h;
+    img.alt = "";
+    img.loading = "lazy";
+    img.decoding = "async";
+    img.src = "https://flagcdn.com/" + w + "x" + h + "/" + low + ".png";
+    img.srcset = "https://flagcdn.com/" + w * 2 + "x" + h * 2 + "/" + low + ".png 2x";
+    img.onerror = () => {
+      wrap.textContent = countryFlag(code) || code;
+      wrap.classList.add("flag-text");
+    };
+    wrap.appendChild(img);
+    return wrap;
+  }
+
+  /* ---------- searchable dropdown ----------
+     Built rather than borrowed: it has to hold 250 rows with a flag on each,
+     filter as you type, and keep working with the keyboard. The value lives in
+     a hidden input, so everything that reads or writes the field carries on
+     using it as if it were still a <select>. */
+  function makeCombo(rootId, opts) {
+    const root = el2(rootId);
+    if (!root) return null;
+    const hidden = root.querySelector('input[type="hidden"]');
+    const toggle = root.querySelector(".combo-toggle");
+    const face = root.querySelector(".combo-face");
+    const pop = root.querySelector(".combo-pop");
+    const search = root.querySelector(".combo-search");
+    const list = root.querySelector(".combo-list");
+    const empty = root.querySelector(".combo-empty");
+    const rows = opts.items || [];
+    const blank = opts.blank || "Rather not say";
+    let shown = rows;
+    let active = -1;
+
+    function paintFace() {
+      const row = rows.find((r) => r.value === hidden.value);
+      face.innerHTML = "";
+      if (row && row.value) {
+        face.appendChild(flagNode(row.value, 14));
+        const label = document.createElement("span");
+        label.textContent = row.label;
+        face.appendChild(label);
+      } else {
+        const label = document.createElement("span");
+        label.className = "muted";
+        label.textContent = blank;
+        face.appendChild(label);
+      }
+    }
+
+    function render(filter) {
+      const q = (filter || "").trim().toLowerCase();
+      shown = q
+        ? rows.filter(
+            (r) =>
+              r.label.toLowerCase().includes(q) ||
+              (r.value && r.value.toLowerCase() === q)
+          )
+        : rows;
+      list.innerHTML = "";
+      // Cap what is in the DOM at once: 250 rows each with an image is a lot
+      // to lay out for a list nobody scrolls to the bottom of.
+      for (const row of shown.slice(0, 80)) {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "combo-item" + (row.value === hidden.value ? " on" : "");
+        item.dataset.value = row.value;
+        item.setAttribute("role", "option");
+        if (row.value) item.appendChild(flagNode(row.value, 14));
+        const label = document.createElement("span");
+        label.textContent = row.label;
+        if (!row.value) label.className = "muted";
+        item.appendChild(label);
+        item.onclick = () => {
+          hidden.value = row.value;
+          paintFace();
+          close();
+        };
+        list.appendChild(item);
+      }
+      empty.classList.toggle("hidden", shown.length > 0);
+      active = -1;
+    }
+
+    function move(step) {
+      const items = [...list.children];
+      if (!items.length) return;
+      if (active >= 0 && items[active]) items[active].classList.remove("cursor");
+      active = (active + step + items.length) % items.length;
+      items[active].classList.add("cursor");
+      items[active].scrollIntoView({ block: "nearest" });
+    }
+
+    function open() {
+      pop.classList.remove("hidden");
+      toggle.setAttribute("aria-expanded", "true");
+      search.value = "";
+      render("");
+      search.focus();
+    }
+
+    function close() {
+      pop.classList.add("hidden");
+      toggle.setAttribute("aria-expanded", "false");
+    }
+
+    toggle.onclick = () => (pop.classList.contains("hidden") ? open() : close());
+    search.oninput = () => render(search.value);
+    search.onkeydown = (e) => {
+      if (e.key === "ArrowDown") { e.preventDefault(); move(1); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); move(-1); }
+      else if (e.key === "Enter") {
+        e.preventDefault();
+        const pick = list.children[active >= 0 ? active : 0];
+        if (pick) pick.click();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        close();
+        toggle.focus();
+      }
+    };
+    // Clicking anywhere else closes it, but a click inside must not.
+    document.addEventListener("click", (e) => {
+      if (!root.contains(e.target)) close();
+    });
+
+    paintFace();
+    return {
+      get: () => hidden.value,
+      set: (value) => {
+        hidden.value = value || "";
+        paintFace();
+      },
+    };
+  }
+
+  let COUNTRY_COMBO = null;
 
   /* ---------- themes and display preferences ----------
      The browser is the source of truth: the choice is written to localStorage
@@ -337,6 +499,34 @@
     startedAt: 0,
     over: false,
   };
+
+  /* ---------- replay recorder ----------
+     Every accepted key, miss and backspace, as [ms, pos, idx, flag] relative
+     to the moment the race armed. A few KB per race. Sent with the result, so
+     the run can be watched back from the feed. Nothing here touches the
+     screen or the network mid-race: it is an array push. */
+  const REC = { events: [], t0: 0, on: false };
+
+  function recStart() {
+    REC.events = [];
+    REC.t0 = performance.now();
+    REC.on = true;
+  }
+
+  function recEvent(flag) {
+    if (!REC.on) return;
+    if (REC.events.length >= 20000) return;  // the server caps it here too
+    REC.events.push([Math.round(performance.now() - REC.t0), T.pos, R.idx, flag || 0]);
+  }
+
+  function recTake() {
+    REC.on = false;
+    return REC.events.length ? REC.events : null;
+  }
+
+  function recSnippets() {
+    return R.playlist && R.playlist.length ? R.playlist.map((x) => x.code) : [T.code];
+  }
 
   function initRun(timed, playlist) {
     R.timed = !!timed;
@@ -527,6 +717,7 @@
     T.curSpan = null;
     T.curLine = -1;
     el.codeBox.scrollTop = 0;
+    if (el.suggest) el.suggest.classList.add("hidden");
     paintHud(0, 100, 0);
     el.hudLeft.textContent = T.code.length;
     markCursor();
@@ -593,15 +784,21 @@
   function armRace(endsAtMs) {
     T.running = true;
     R.over = false;
-    if (!R.startedAt) R.startedAt = performance.now();
+    if (!R.startedAt) {
+      R.startedAt = performance.now();
+      recStart();
+    }
     if (endsAtMs != null) R.endsAt = endsAtMs;
     el.codeBox.classList.remove("locked");
     const strict = S.lobby && S.lobby.strict && !S.solo;
+    const tips = S.lobby && S.lobby.suggest && !S.solo;
     el.hint.textContent = R.timed
       ? "type! — a new snippet appears while the clock runs"
+      : tips
+      ? "type! — Tab completes a keyword, and always clears indentation"
       : strict
-      ? "type! — strict lobby: the indentation is yours to type"
-      : "type! — indentation is auto-skipped";
+      ? "type! — strict lobby: the indentation is yours to type (Tab for one level)"
+      : "type! — Tab clears the indentation";
     focusTrap();
     loop();
   }
@@ -679,8 +876,10 @@
       span.classList.add("done");
       T.pos++;
       autoSkipIndent();
+      recEvent(0);
       markCursor();
       scrollToCursor();
+      paintSuggestion();
       el.hudLeft.textContent = T.code.length - T.pos;
       if (T.pos >= T.code.length) snippetDone();
       return;
@@ -689,6 +888,7 @@
     T.errors++;
     T.bad = true;
     span.classList.add("bad");
+    recEvent(1);
   }
 
   function backspace() {
@@ -702,9 +902,57 @@
     T.pos--;
     const span = T.chars[T.pos];
     span.classList.remove("done", "bad");
+    recEvent(2);
     markCursor();
     scrollToCursor();
+    paintSuggestion();
     el.hudLeft.textContent = T.code.length - T.pos;
+  }
+
+  /**
+   * Tab, whatever the lobby is set to.
+   *
+   * It used to type a literal tab character, which only matched snippets that
+   * were actually tab-indented - on a space-indented one, the indent key
+   * scored an error. Now it clears the whitespace ahead of the caret in one
+   * press: the whole run in a normal lobby, one level at a time in a strict
+   * one, so strict still costs a keypress per level.
+   *
+   * With suggestions on it doubles as the accept key for a keyword, which is
+   * only offered when the caret is on a word rather than on whitespace, so the
+   * two uses never collide.
+   */
+  function tabKey() {
+    if (!T.running || T.pos >= T.code.length) return;
+    const ch = T.code[T.pos];
+    if (ch !== " " && ch !== "\t") {
+      if (suggestions()) acceptSuggestion();
+      return;
+    }
+    if (!T.startedAt) T.startedAt = performance.now();
+    const strict = suggestOff() && S.lobby && S.lobby.strict && !S.solo;
+    let budget = strict ? INDENT : Infinity;
+    while (T.pos < T.code.length && budget > 0) {
+      const at = T.code[T.pos];
+      if (at !== " " && at !== "\t") break;
+      const span = T.chars[T.pos];
+      span.classList.remove("bad", "cur");
+      span.classList.add("done");
+      T.typed++;
+      budget -= at === "\t" ? INDENT : 1;
+      T.pos++;
+    }
+    T.bad = false;
+    recEvent(0);
+    markCursor();
+    scrollToCursor();
+    paintSuggestion();
+    el.hudLeft.textContent = T.code.length - T.pos;
+    if (T.pos >= T.code.length) snippetDone();
+  }
+
+  function suggestOff() {
+    return true;  // kept explicit: strict only limits Tab, never disables it
   }
 
   function onKeyDown(e) {
@@ -712,8 +960,102 @@
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key === "Backspace") { e.preventDefault(); backspace(); return; }
     if (e.key === "Enter") { e.preventDefault(); typeChar("\n"); return; }
-    if (e.key === "Tab") { e.preventDefault(); typeChar("\t"); return; }
+    if (e.key === "Tab") { e.preventDefault(); tabKey(); return; }
     if (e.key.length === 1) { e.preventDefault(); typeChar(e.key); }
+  }
+
+  /* ---------- suggestions ----------
+     A lobby option. The snippet is fixed, so a suggestion can only ever be the
+     word the snippet already has at the caret - this is a speed aid, not free
+     text. It is offered when that word is a keyword or builtin of the language
+     being raced and you are partway into it; Tab types the rest.
+
+     Prism already ships a keyword list per language, and using it means the
+     suggestions match the highlighting the player is looking at rather than a
+     second hand-kept list that would drift away from it. */
+  const WORD_CHAR = /[A-Za-z0-9_$]/;
+  const KEYWORDS = {};
+
+  function keywordsFor(lang) {
+    if (KEYWORDS[lang]) return KEYWORDS[lang];
+    const found = new Set();
+    const grammar = grammarFor(lang);
+    const scan = (rule) => {
+      if (!rule) return;
+      if (Array.isArray(rule)) return rule.forEach(scan);
+      if (rule instanceof RegExp) {
+        // pull the plain words out of an alternation like \b(?:def|class)\b
+        for (const word of String(rule.source).match(/[A-Za-z_][A-Za-z0-9_]{1,}/g) || []) {
+          if (word.length >= 3) found.add(word);
+        }
+        return;
+      }
+      if (typeof rule === "object") {
+        if (rule.pattern) scan(rule.pattern);
+        if (rule.inside) scan(rule.inside);
+        for (const key of Object.keys(rule)) {
+          if (key === "pattern" || key === "inside") continue;
+          scan(rule[key]);
+        }
+      }
+    };
+    for (const key of ["keyword", "builtin", "function", "class-name", "boolean"]) {
+      if (grammar && grammar[key]) scan(grammar[key]);
+    }
+    KEYWORDS[lang] = found;
+    return found;
+  }
+
+  function suggestions() {
+    if (S.solo || !S.lobby || !S.lobby.suggest) return null;
+    if (!T.running || T.bad || T.pos >= T.code.length) return null;
+    // where the word under the caret starts and ends in the snippet
+    let start = T.pos;
+    while (start > 0 && WORD_CHAR.test(T.code[start - 1])) start--;
+    if (start === T.pos) return null;      // not partway into a word yet
+    let end = T.pos;
+    while (end < T.code.length && WORD_CHAR.test(T.code[end])) end++;
+    const word = T.code.slice(start, end);
+    if (word.length < 3 || end === T.pos) return null;
+    if (!keywordsFor(S.lobby.language).has(word)) return null;
+    return { word, rest: T.code.slice(T.pos, end), end };
+  }
+
+  function acceptSuggestion() {
+    const hit = suggestions();
+    if (!hit) return;
+    if (!T.startedAt) T.startedAt = performance.now();
+    while (T.pos < hit.end) {
+      const span = T.chars[T.pos];
+      span.classList.remove("bad", "cur");
+      span.classList.add("done");
+      T.typed++;
+      T.pos++;
+    }
+    T.bad = false;
+    autoSkipIndent();
+    recEvent(0);
+    markCursor();
+    scrollToCursor();
+    paintSuggestion();
+    el.hudLeft.textContent = T.code.length - T.pos;
+    if (T.pos >= T.code.length) snippetDone();
+  }
+
+  /** The floating "⇥ print" hint, parked just under the caret. */
+  function paintSuggestion() {
+    const box = el.suggest;
+    if (!box) return;
+    const hit = suggestions();
+    const span = hit ? T.chars[T.pos] : null;
+    if (!hit || !span) {
+      box.classList.add("hidden");
+      return;
+    }
+    box.textContent = "\u21e5 " + hit.word;
+    box.style.left = span.offsetLeft + "px";
+    box.style.top = span.offsetTop + (span.offsetHeight || 24) + "px";
+    box.classList.remove("hidden");
   }
 
   /** One snippet completed: bank it, then continue or end the race. */
@@ -731,6 +1073,7 @@
       paintSnipMeta(next.level, next.topic);
       renderCode(next.code, S.lobby ? S.lobby.language : S.lang);
       armRace();
+      recEvent(0);
       sendProgress();
       return;
     }
@@ -756,6 +1099,9 @@
     } else {
       send({ t: "progress", p: T.pos / Math.max(1, T.code.length), wpm: w, acc: a,
              idx: R.idx, chars: liveChars(), snips: R.snips });
+      // the clock ended this one, so nothing else carries the timeline
+      const events = recTake();
+      if (events) send({ t: "replay", events });
     }
   }
 
@@ -784,6 +1130,7 @@
         time: secs,
         chars: liveChars(),
         snips: R.snips,
+        replay: recTake(),
       });
       updateSelfBar(1);
     }
@@ -1289,22 +1636,14 @@
 
   /** Country and birth-year pickers, built once and reused. */
   function fillAboutFields() {
-    const country = el2("pfCountry");
-    if (country && !country.options.length) {
-      const blank = document.createElement("option");
-      blank.value = "";
-      blank.textContent = "Rather not say";
-      country.appendChild(blank);
+    if (!COUNTRY_COMBO) {
       // sorted by the name the reader actually sees, not by the code
-      const sorted = COUNTRY_CODES.map((code) => [code, countryName(code)]).sort(
-        (a, b) => a[1].localeCompare(b[1])
+      const items = [{ value: "", label: "Rather not say" }].concat(
+        COUNTRY_CODES.map((code) => ({ value: code, label: countryName(code) })).sort(
+          (a, b) => a.label.localeCompare(b.label)
+        )
       );
-      for (const [code, label] of sorted) {
-        const opt = document.createElement("option");
-        opt.value = code;
-        opt.textContent = countryFlag(code) + "  " + label;
-        country.appendChild(opt);
-      }
+      COUNTRY_COMBO = makeCombo("pfCountryCombo", { items });
     }
 
     const year = el2("pfBirthYear");
@@ -1328,7 +1667,7 @@
     renderThemes();
     wireDisplayToggles();
     fillAboutFields();
-    el2("pfCountry").value = (S.me && S.me.country) || "";
+    if (COUNTRY_COMBO) COUNTRY_COMBO.set((S.me && S.me.country) || "");
     el2("pfBirthYear").value = (S.me && S.me.birth_year) ? String(S.me.birth_year) : "";
     el2("pfGender").value = (S.me && S.me.gender) || "";
     el.pfErr.textContent = "";
@@ -1341,6 +1680,8 @@
     el.pfNameNote.className = "name-note";
     paintIdeas([]);
     closeCropper();
+    closeCoverCropper();
+    el.cvRemove.classList.toggle("hidden", !(S.me && S.me.cover));
     el.modal.classList.remove("hidden");
     el.pfName.focus();
   }
@@ -1352,22 +1693,110 @@
   /* ---------- avatar cropper ---------- */
   const CROP_PX = 256;
   const CROP = { img: null, zoom: 1, x: 0, y: 0, drag: null };
+  // The cover is the same cropper at a banner aspect. Its canvas carries the
+  // output size, so the drawing code below never hard-codes either shape.
+  const COVER = { img: null, zoom: 1, x: 0, y: 0, drag: null };
 
-  function drawCrop() {
-    const ctx = el.pfCanvas.getContext("2d");
-    ctx.clearRect(0, 0, CROP_PX, CROP_PX);
-    if (!CROP.img) return;
-    const img = CROP.img;
-    // "cover" the square, then apply the zoom and the drag offset
-    const base = Math.max(CROP_PX / img.width, CROP_PX / img.height);
-    const scale = base * CROP.zoom;
+  function paintCrop(state, canvas) {
+    const cw = canvas.width;
+    const ch = canvas.height;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, cw, ch);
+    if (!state.img) return;
+    const img = state.img;
+    // "cover" the frame, then apply the zoom and the drag offset
+    const base = Math.max(cw / img.width, ch / img.height);
+    const scale = base * state.zoom;
     const w = img.width * scale;
     const h = img.height * scale;
-    const maxX = Math.max(0, (w - CROP_PX) / 2);
-    const maxY = Math.max(0, (h - CROP_PX) / 2);
-    CROP.x = Math.max(-maxX, Math.min(maxX, CROP.x));
-    CROP.y = Math.max(-maxY, Math.min(maxY, CROP.y));
-    ctx.drawImage(img, (CROP_PX - w) / 2 + CROP.x, (CROP_PX - h) / 2 + CROP.y, w, h);
+    const maxX = Math.max(0, (w - cw) / 2);
+    const maxY = Math.max(0, (h - ch) / 2);
+    state.x = Math.max(-maxX, Math.min(maxX, state.x));
+    state.y = Math.max(-maxY, Math.min(maxY, state.y));
+    ctx.drawImage(img, (cw - w) / 2 + state.x, (ch - h) / 2 + state.y, w, h);
+  }
+
+  function drawCrop() {
+    paintCrop(CROP, el.pfCanvas);
+  }
+
+  function drawCover() {
+    paintCrop(COVER, el.cvCanvas);
+  }
+
+  function openCoverCropper(file) {
+    if (!file) return;
+    if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type)) {
+      el.pfErr.textContent = "use a png, jpeg, gif or webp";
+      return;
+    }
+    if (file.size > 12 * 1024 * 1024) {
+      el.pfErr.textContent = "that cover is too big to load (12 MB max)";
+      return;
+    }
+    el.pfErr.textContent = "";
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      COVER.img = img;
+      COVER.zoom = 1;
+      COVER.x = 0;
+      COVER.y = 0;
+      el.cvZoom.value = "100";
+      el.cvCrop.classList.remove("hidden");
+      el.cvDrop.classList.add("hidden");
+      drawCover();
+      URL.revokeObjectURL(url);
+    };
+    img.onerror = () => {
+      el.pfErr.textContent = "could not read that image";
+      URL.revokeObjectURL(url);
+    };
+    img.src = url;
+  }
+
+  function closeCoverCropper() {
+    COVER.img = null;
+    el.cvCrop.classList.add("hidden");
+    el.cvDrop.classList.remove("hidden");
+    el.cvFile.value = "";
+  }
+
+  function coverBlob() {
+    if (!COVER.img) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      el.cvCanvas.toBlob(
+        (blob) => resolve(blob ? new File([blob], "cover.webp", { type: blob.type }) : null),
+        "image/webp",
+        0.86
+      );
+    });
+  }
+
+  /** Drag to reposition, for either cropper. */
+  function dragCrop(stage, state, redraw) {
+    if (!stage) return;
+    const down = (e) => {
+      if (!state.img) return;
+      const point = e.touches ? e.touches[0] : e;
+      state.drag = { x: point.clientX, y: point.clientY, ox: state.x, oy: state.y };
+      e.preventDefault();
+    };
+    const move = (e) => {
+      if (!state.drag) return;
+      const point = e.touches ? e.touches[0] : e;
+      state.x = state.drag.ox + (point.clientX - state.drag.x);
+      state.y = state.drag.oy + (point.clientY - state.drag.y);
+      redraw();
+      e.preventDefault();
+    };
+    const up = () => { state.drag = null; };
+    stage.addEventListener("mousedown", down);
+    stage.addEventListener("touchstart", down, { passive: false });
+    window.addEventListener("mousemove", move);
+    window.addEventListener("touchmove", move, { passive: false });
+    window.addEventListener("mouseup", up);
+    window.addEventListener("touchend", up);
   }
 
   function openCropper(file) {
@@ -1507,6 +1936,29 @@
       S.me = data.user;
       localStorage.setItem("cr_name", name);
 
+      // The cover goes up on its own request, after the profile itself, so a
+      // failed banner never costs the player their name change.
+      const cover = await coverBlob();
+      if (cover) {
+        const form = new FormData();
+        form.append("file", cover);
+        const up = await fetch("/api/cover", {
+          method: "POST",
+          credentials: "same-origin",
+          body: form,
+        });
+        const upData = await up.json().catch(() => ({}));
+        if (!up.ok) {
+          el.pfErr.textContent =
+            upData.error === "too_large"
+              ? "the cover is over 1.5 MB"
+              : upData.error || "cover upload failed";
+          return;
+        }
+        S.me.cover = upData.cover_version;
+        closeCoverCropper();
+      }
+
       const file = await croppedBlob();
       if (file) {
         const form = new FormData();
@@ -1570,6 +2022,8 @@
           length: Math.max(1, R.chars + T.code.length),
           errors: R.errors + T.errors,
           completed: true,
+          replay: recTake(),
+          snippets: recSnippets(),
         }),
       });
       loadLeaderboard();
@@ -1636,7 +2090,7 @@
         el.name.value = m.name;
         el.roomCode.textContent = m.code;
         el.codeText.textContent = m.code;
-        history.replaceState(null, "", "/?l=" + m.code);
+        history.replaceState(null, "", "/race/" + m.code);
         showRoom();
         break;
       case "error":
@@ -1719,12 +2173,17 @@
     const strictBox = el2("roomStrict");
     const rankedBox = el2("roomRanked");
     const limitBox = el2("roomLimit");
+    const suggestBox = el2("roomSuggest");
     if (strictBox && rankedBox) {
       strictBox.checked = !!st.strict;
       rankedBox.checked = st.ranked !== false;
       const settled = !isHost || st.state === "countdown" || st.state === "racing";
       strictBox.disabled = settled;
       rankedBox.disabled = settled;
+      if (suggestBox) {
+        suggestBox.checked = !!st.suggest;
+        suggestBox.disabled = settled;
+      }
       if (limitBox) {
         limitBox.value = String(st.limit || 0);
         limitBox.disabled = settled;
@@ -1732,6 +2191,7 @@
     }
     el.stateBadge.title =
       (st.strict ? "strict typing" : "indentation auto-skipped") +
+      " · " + (st.suggest ? "suggestions on" : "no suggestions") +
       " · " + (st.ranked === false ? "unranked" : "ranked");
     const over = st.state === "finished";
     el.again.classList.toggle("hidden", !(isHost && over));
@@ -2096,10 +2556,10 @@
         el.ranksTable.appendChild(mine);
       }
 
-      el.ranksBots.innerHTML = "";
-      (data.bots || []).slice().reverse().forEach((bot, i) =>
-        el.ranksBots.appendChild(rankRow(i + 1, bot, false))
-      );
+      // Bots are deliberately not on this board. They are opposition, not
+      // players: they have a fixed rating that never moves, so listing them
+      // among people pushes every real player down a board they cannot beat.
+      // The roster still lives on the home page, as something to pick.
 
       el.ranksLadder.innerHTML = "";
       for (const tier of data.ranks || []) {
@@ -2163,7 +2623,8 @@
     if (tag) tag.classList.add("hidden");
     const watchers = el2("watchers");
     if (watchers) watchers.classList.add("hidden");
-    history.replaceState(null, "", "/");
+    if (location.pathname !== "/") history.pushState(null, "", "/");
+    document.title = PAGE_TITLES["/"];
     renderFilters();
     paintBackButton();
   }
@@ -2207,6 +2668,9 @@
       focusTrap();
     }
     paintBackButton();
+    if (S.room && S.room !== "solo") {
+      document.title = "Lobby " + S.room + " — CodeRace";
+    }
   }
 
   /** The strip of people watching this lobby. */
@@ -2240,7 +2704,7 @@
     R.over = true;
     el.codeBox.classList.add("locked");
     el.hint.textContent = "you gave up - the race carries on without you";
-    send({ t: "resign" });
+    send({ t: "resign", replay: recTake() });
   }
 
   async function startSolo() {
@@ -2614,6 +3078,75 @@
     return "last seen " + ago(new Date(Date.now() - seconds * 1000).toISOString());
   }
 
+  /* ---------- routes ----------
+     One URL per screen. screenOnly() pushes it, popstate opens it, and the
+     first load reads it, so a page can be linked to, refreshed, and found. */
+  const PAGE_TITLES = {
+    "/": "CodeRace — type real code, race your friends",
+    "/lobbies": "Lobbies — CodeRace",
+    "/players": "Find players — CodeRace",
+    "/feed": "Race feed — CodeRace",
+    "/rankings": "Rankings — CodeRace",
+    "/awards": "Achievements — CodeRace",
+    "/snippets": "Your snippets — CodeRace",
+  };
+  const SCREEN_PATHS = {
+    "screen-lobbies": "/lobbies",
+    "screen-players": "/players",
+    "screen-feed": "/feed",
+    "screen-ranks": "/rankings",
+    "screen-awards": "/awards",
+    "screen-snippets": "/snippets",
+  };
+  let ROUTING = false;  // true while popstate is driving, so nothing pushes
+
+  function routeTo(node) {
+    if (!node || ROUTING) return;
+    let path = SCREEN_PATHS[node.id];
+    if (node.id === "screen-user" && SOCIAL.viewing) path = "/profile/" + SOCIAL.viewing;
+    if (node.id === "screen-awards" && SOCIAL.awardsFor) path = "/awards?user=" + SOCIAL.awardsFor;
+    if (node.id === "screen-room" && S.room && S.room !== "solo") path = "/race/" + S.room;
+    if (node.id === "screen-home") path = "/";
+    if (!path) return;
+    const here = location.pathname + location.search;
+    if (here !== path) history.pushState(null, "", path);
+    document.title =
+      node.id === "screen-user" && el2("userName")
+        ? (el2("userName").textContent || "Profile") + " — CodeRace"
+        : PAGE_TITLES[path.split("?")[0]] || PAGE_TITLES["/"];
+  }
+
+  function openPath(path, search) {
+    const q = new URLSearchParams(search || "");
+    if (path.startsWith("/profile/")) {
+      const id = parseInt(path.slice(9), 10);
+      if (id) return showUser(id);
+    }
+    if (path.startsWith("/race/")) {
+      const code = path.slice(6).toUpperCase();
+      if (code && S.room !== code) joinLobby(code);
+      return;
+    }
+    switch (path) {
+      case "/lobbies": return showLobbies();
+      case "/players": return showPlayers();
+      case "/feed": return showFeed();
+      case "/rankings": return showRanks();
+      case "/awards": return showAwards(parseInt(q.get("user") || "0", 10) || 0);
+      case "/snippets": return showSnippets();
+      default: return backToGame();
+    }
+  }
+
+  window.addEventListener("popstate", () => {
+    ROUTING = true;
+    try {
+      openPath(location.pathname, location.search);
+    } finally {
+      ROUTING = false;
+    }
+  });
+
   function screenOnly(node) {
     for (const s of [el.home, el.room, el.ranks, el2("screen-feed"),
                      el2("screen-players"), el2("screen-user"),
@@ -2625,6 +3158,7 @@
     clearInterval(SOCIAL.playersTimer);
     clearInterval(SOCIAL.lobbiesTimer);
     paintBackButton();
+    routeTo(node);
     // body does not scroll - each screen is its own scroll container
     if (node && node.scrollTo) node.scrollTo(0, 0);
   }
@@ -2643,6 +3177,190 @@
     btn.textContent = S.room
       ? S.spectating ? "back to the race" : "back to your lobby"
       : "back to the game";
+  }
+
+  /* ---------- replay player ----------
+     Plays a keystroke timeline back onto a copy of the code area. It is its
+     own set of spans, so watching a replay never touches the race you might
+     be in the middle of. Time is walked with requestAnimationFrame against
+     the recorded clock, so 2x and 4x are exact rather than "faster". */
+  const RP = {
+    data: null, spans: [], lineOf: [], chars: 0,
+    at: 0,           // index of the next event to apply
+    ms: 0,           // playback clock, in recorded milliseconds
+    speed: 1, playing: false, raf: 0, wall: 0,
+    idx: 0, pos: 0, misses: 0, typed: 0,
+  };
+
+  function rpRender(idx) {
+    const code = (RP.data.snippets || [])[idx] || "";
+    const lang = RP.data.language || "python";
+    const area = el2("rpArea");
+    area.innerHTML = Prism.highlight(code, grammarFor(lang), lang);
+    RP.spans = wrapChars(area);
+    if (RP.spans.length !== code.length) {
+      area.textContent = code;
+      RP.spans = wrapChars(area);
+    }
+    RP.chars = code.length;
+    RP.idx = idx;
+    RP.pos = 0;
+    // line numbers, same as the live box
+    const lines = code.split("\n").length;
+    const gutter = el2("rpGutter");
+    gutter.innerHTML = "";
+    for (let n = 1; n <= lines; n++) {
+      const i = document.createElement("i");
+      i.textContent = n;
+      gutter.appendChild(i);
+    }
+    el2("rpBox").style.setProperty("--ln-w", String(lines).length + 0.5 + "ch");
+    // indent guides
+    let col = 0, leading = true;
+    for (let i = 0; i < code.length; i++) {
+      const ch = code[i];
+      if (ch === "\n") { col = 0; leading = true; continue; }
+      if (leading && (ch === " " || ch === "\t")) {
+        if (col % INDENT === 0) RP.spans[i].classList.add("ig");
+        col += ch === "\t" ? INDENT : 1;
+      } else { leading = false; col++; }
+    }
+  }
+
+  function rpSeekTo(ms) {
+    // Rebuild from the top to the requested time. Events are a few thousand at
+    // most, so replaying them from zero is cheaper than keeping an undo log.
+    const ev = RP.data.events;
+    RP.at = 0; RP.ms = ms; RP.misses = 0; RP.typed = 0;
+    rpRender(0);
+    for (const span of RP.spans) span.classList.remove("done", "bad", "cur");
+    while (RP.at < ev.length && ev[RP.at][0] <= ms) {
+      rpApply(ev[RP.at]);
+      RP.at++;
+    }
+    rpPaint();
+  }
+
+  function rpApply(row) {
+    const [, pos, idx, flag] = row;
+    if (idx !== RP.idx) {
+      rpRender(idx);
+    }
+    if (flag === 1) {
+      RP.misses++;
+      const s = RP.spans[Math.min(pos, RP.spans.length - 1)];
+      if (s) s.classList.add("bad");
+      return;
+    }
+    // correct key or backspace: the caret simply lands on `pos`
+    const from = Math.min(RP.pos, pos);
+    const to = Math.max(RP.pos, pos);
+    for (let i = from; i < to; i++) {
+      const s = RP.spans[i];
+      if (!s) continue;
+      if (pos > RP.pos) { s.classList.add("done"); s.classList.remove("bad"); }
+      else s.classList.remove("done", "bad");
+    }
+    if (pos > RP.pos) RP.typed += pos - RP.pos;
+    RP.pos = pos;
+  }
+
+  function rpPaint() {
+    for (const s of RP.spans) s.classList.remove("cur");
+    const cur = RP.spans[RP.pos];
+    if (cur) {
+      cur.classList.add("cur");
+      const box = el2("rpBox");
+      const top = cur.offsetTop;
+      const view = box.clientHeight;
+      if (box.scrollHeight > view) {
+        box.scrollTop = Math.max(0, Math.min(box.scrollHeight - view, top - view * 0.38));
+      }
+    }
+    const secs = RP.ms / 1000;
+    const wpm = secs > 0.5 ? (RP.typed / 5) / (secs / 60) : 0;
+    const acc = RP.typed + RP.misses ? (RP.typed / (RP.typed + RP.misses)) * 100 : 100;
+    el2("rpWpm").textContent = Math.round(wpm);
+    el2("rpAcc").textContent = Math.round(acc) + "%";
+    el2("rpTime").textContent = secs.toFixed(1) + "s";
+    el2("rpErrors").textContent = RP.misses;
+    const total = rpTotal();
+    el2("rpScrub").value = total ? Math.round((RP.ms / total) * 1000) : 0;
+  }
+
+  function rpTotal() {
+    const ev = RP.data && RP.data.events;
+    return ev && ev.length ? ev[ev.length - 1][0] : 0;
+  }
+
+  function rpTick(now) {
+    if (!RP.playing) return;
+    const dt = now - RP.wall;
+    RP.wall = now;
+    RP.ms += dt * RP.speed;
+    const ev = RP.data.events;
+    while (RP.at < ev.length && ev[RP.at][0] <= RP.ms) {
+      rpApply(ev[RP.at]);
+      RP.at++;
+    }
+    rpPaint();
+    if (RP.at >= ev.length) {
+      RP.ms = rpTotal();
+      rpPause();
+      rpPaint();
+      return;
+    }
+    RP.raf = requestAnimationFrame(rpTick);
+  }
+
+  function rpPlay() {
+    if (!RP.data) return;
+    if (RP.at >= RP.data.events.length) rpSeekTo(0);
+    RP.playing = true;
+    RP.wall = performance.now();
+    el2("rpPlay").innerHTML = "&#10074;&#10074; pause";
+    RP.raf = requestAnimationFrame(rpTick);
+  }
+
+  function rpPause() {
+    RP.playing = false;
+    cancelAnimationFrame(RP.raf);
+    el2("rpPlay").innerHTML = "&#9654; play";
+  }
+
+  async function openReplay(postId, post) {
+    const modal = el2("replayModal");
+    if (!modal) return;
+    rpPause();
+    el2("rpTitle").textContent = "Replay";
+    el2("rpSub").textContent = "loading…";
+    el2("rpArea").textContent = "";
+    modal.classList.remove("hidden");
+    try {
+      const res = await fetch("/api/replay/" + postId);
+      if (!res.ok) throw new Error("no replay");
+      const d = await res.json();
+      RP.data = d;
+      RP.speed = 1;
+      for (const b of el2("rpSpeed").querySelectorAll("button")) {
+        b.classList.toggle("on", b.dataset.speed === "1");
+      }
+      el2("rpTitle").textContent = d.name + (d.kind === "solo" ? " - solo run" : " - race");
+      el2("rpSub").textContent =
+        Math.round(d.wpm) + " wpm · " + Math.round(d.acc) + "% · " +
+        (d.language || "") + (d.place ? " · #" + d.place : "") +
+        " · " + d.created_at.slice(0, 10);
+      rpSeekTo(0);
+      rpPlay();
+    } catch (err) {
+      el2("rpSub").textContent = "this run has no replay";
+    }
+  }
+
+  function closeReplay() {
+    rpPause();
+    RP.data = null;
+    el2("replayModal").classList.add("hidden");
   }
 
   /* ---------- posts ---------- */
@@ -2699,6 +3417,9 @@
       '<button class="react up-btn" type="button">&#9650; <b></b></button>' +
       '<button class="react down-btn" type="button">&#9660; <b></b></button>' +
       '<button class="react talk-btn" type="button">comments <b></b></button>' +
+      (post.replay_id
+        ? '<button class="react play-btn" type="button">&#9654; replay</button>'
+        : "") +
       '<span class="post-grow"></span>' +
       '<button class="react flag-btn" type="button">report</button>' +
       (post.mine ? '<button class="react del-btn" type="button">delete</button>' : "");
@@ -2727,6 +3448,8 @@
     };
     bar.querySelector(".flag-btn").onclick = () =>
       openReport("post", post.id, "this race post");
+    const play = bar.querySelector(".play-btn");
+    if (play) play.onclick = () => openReplay(post.id, post);
     const del = bar.querySelector(".del-btn");
     if (del) del.onclick = () => deletePost(post.id, card);
 
@@ -2910,16 +3633,27 @@
 
       el2("userTitle").textContent = d.me ? "Your profile" : "Profile";
       el2("userName").textContent = p.name;
+      document.title = p.name + " — " + p.rank + " — CodeRace";
       const badge = el2("userRankBadge");
       badge.textContent = p.rank;
       badge.className = "rank-badge tier-" + rankTier(p.rating);
       el2("userRating").textContent = p.rating;
       paintBadges(p);
+      paintProfileAwards(p, userId);
       el2("userAwards").onclick = () => showAwards(userId);
       el2("userSeen").textContent =
         (p.online ? "online now" : idleText(p.idle)) +
         (p.joined ? " · joined " + p.joined.slice(0, 10) : "");
       paintAvatar(el2("userAvatar"), p);
+      const cover = el2("userCover");
+      if (cover) {
+        // The version in the URL is what makes a new upload show up instead of
+        // the browser handing back the one it already has.
+        cover.classList.toggle("hidden", !p.cover);
+        cover.style.backgroundImage = p.cover
+          ? 'url("/api/cover/' + userId + "?v=" + p.cover + '")'
+          : "";
+      }
 
       // Headline records. best_wpm is a decimal, and rounding a personal best
       // down to a whole number loses the thing that makes it a record.
@@ -2985,21 +3719,20 @@
     const box = el2("userDetails");
     if (!box) return;
     const rows = [];
-    if (p.country) {
-      const flag = countryFlag(p.country);
-      rows.push(["Country", (flag ? flag + " " : "") + countryName(p.country)]);
-    }
+    if (p.country) rows.push(["Country", countryName(p.country), p.country]);
     if (p.age != null) rows.push(["Age", String(p.age)]);
     if (p.gender) rows.push(["Gender", GENDER_LABELS[p.gender] || p.gender]);
 
     box.innerHTML = "";
     box.classList.toggle("hidden", rows.length === 0);
-    for (const [label, value] of rows) {
+    for (const [label, value, code] of rows) {
       const item = document.createElement("div");
       item.className = "detail";
       item.innerHTML = "<span></span><b></b>";
       item.querySelector("span").textContent = label;
-      item.querySelector("b").textContent = value;
+      const body = item.querySelector("b");
+      if (code) body.appendChild(flagNode(code, 14));
+      body.appendChild(document.createTextNode(value));
       box.appendChild(item);
     }
   }
@@ -3026,7 +3759,11 @@
 
     // Rarity is the point of the page, so it leads on both halves.
     const share =
-      a.share != null ? a.share.toFixed(1).replace(/\.0$/, "") + "% of players" : "";
+      a.share != null
+        ? a.share.toFixed(1).replace(/\.0$/, "") + "% of players"
+        : a.holders != null
+        ? a.holders + (a.holders === 1 ? " player has this" : " players have this")
+        : "";
     const meta = card.querySelector(".award-meta");
     meta.textContent = a.earned
       ? share + (a.earned_at ? " \u00b7 earned " + String(a.earned_at).slice(0, 10) : "")
@@ -3089,8 +3826,30 @@
   }
 
   function showAwards(userId) {
+    SOCIAL.awardsFor = userId || 0;
     screenOnly(el2("screen-awards"));
     loadAwards(userId || 0);
+  }
+
+  /**
+   * The achievements this player holds, on their own profile rather than a
+   * click away. Earned cards only - the full catalogue, with what is still to
+   * get, is one button along.
+   */
+  function paintProfileAwards(p, userId) {
+    const grid = el2("userAwardsGrid");
+    if (!grid) return;
+    const rows = p.awards || [];
+    grid.innerHTML = "";
+    for (const a of rows) {
+      // Already earned by definition, so every card here is a lit one.
+      grid.appendChild(awardCard({ ...a, earned: true }));
+    }
+    el2("userAwardsNone").classList.toggle("hidden", rows.length > 0);
+    el2("userAwardsCount").textContent = p.awards_total
+      ? rows.length + " of " + p.awards_total
+      : String(rows.length);
+    el2("userAwardsAll").onclick = () => showAwards(userId);
   }
 
   /** The badge row under a name on a profile. */
@@ -3209,6 +3968,7 @@
     const mode = r.duration ? r.duration + "s run" : "one snippet";
     const bits = [r.language, mode];
     if (r.strict) bits.push("strict");
+    if (r.suggest) bits.push("suggestions");
     if (r.ranked === false) bits.push("unranked");
     if (r.levels && r.levels.length) bits.push(r.levels.join("/"));
     if (r.topics && r.topics.length) bits.push(r.topics.join("/"));
@@ -3353,6 +4113,7 @@
         key: priv ? key : "",
         title: el2("newTitle").value.trim().slice(0, 40),
         strict: el2("newStrict").checked ? "1" : "0",
+        suggest: el2("newSuggest").checked ? "1" : "0",
         ranked: el2("newRanked").checked ? "1" : "0",
         limit: el2("newLimit").value || "0",
       });
@@ -3943,6 +4704,46 @@
   on(el2("playersBtn"), "click", showPlayers);
   on(el2("lobbiesBtn"), "click", showLobbies);
   on(el2("awardsBtn"), "click", () => showAwards(0));
+  on(el.cvDrop, "click", () => el.cvFile.click());
+  on(el.cvFile, "change", (e) => openCoverCropper(e.target.files && e.target.files[0]));
+  on(el2("cvRecrop"), "click", closeCoverCropper);
+  on(el.cvZoom, "input", () => {
+    COVER.zoom = parseInt(el.cvZoom.value, 10) / 100;
+    drawCover();
+  });
+  on(el.cvRemove, "click", async () => {
+    await fetch("/api/cover", { method: "DELETE", credentials: "same-origin" }).catch(() => {});
+    if (S.me) S.me.cover = 0;
+    el.cvRemove.classList.add("hidden");
+    closeCoverCropper();
+  });
+  on(el.cvDrop, "dragover", (e) => { e.preventDefault(); el.cvDrop.classList.add("over"); });
+  on(el.cvDrop, "dragleave", () => el.cvDrop.classList.remove("over"));
+  on(el.cvDrop, "drop", (e) => {
+    e.preventDefault();
+    el.cvDrop.classList.remove("over");
+    openCoverCropper(e.dataTransfer.files && e.dataTransfer.files[0]);
+  });
+  dragCrop(el.cvStage, COVER, drawCover);
+
+  on(el2("rpClose"), "click", closeReplay);
+  on(el2("rpPlay"), "click", () => (RP.playing ? rpPause() : rpPlay()));
+  on(el2("rpRestart"), "click", () => { rpSeekTo(0); rpPlay(); });
+  on(el2("rpScrub"), "input", () => {
+    if (!RP.data) return;
+    rpPause();
+    rpSeekTo((parseInt(el2("rpScrub").value, 10) / 1000) * rpTotal());
+  });
+  on(el2("rpSpeed"), "click", (e) => {
+    const b = e.target.closest("button[data-speed]");
+    if (!b) return;
+    RP.speed = parseFloat(b.dataset.speed) || 1;
+    for (const x of el2("rpSpeed").querySelectorAll("button")) x.classList.toggle("on", x === b);
+  });
+  on(el2("replayModal"), "click", (e) => {
+    if (e.target === el2("replayModal")) closeReplay();
+  });
+
   on(el2("pfViewPublic"), "click", () => {
     closeProfile();
     if (S.me) showUser(S.me.id);
@@ -3952,6 +4753,9 @@
   );
   on(el2("roomRanked"), "change", () =>
     send({ t: "mode", ranked: el2("roomRanked").checked })
+  );
+  on(el2("roomSuggest"), "change", () =>
+    send({ t: "mode", suggest: el2("roomSuggest").checked })
   );
   on(el2("roomLimit"), "change", () =>
     send({ t: "mode", limit: parseInt(el2("roomLimit").value || "0", 10) })
@@ -3993,7 +4797,20 @@
     resizeTimer = setTimeout(remeasure, 120);
   });
   Promise.all([initMeta(), loadMe(), loadBots()]).then(() => {
+    // the old ?l=CODE links keep working
     const code = new URLSearchParams(location.search).get("l");
-    if (code) joinLobby(code);
+    if (code) {
+      history.replaceState(null, "", "/race/" + code.toUpperCase());
+      joinLobby(code);
+      return;
+    }
+    if (location.pathname !== "/") {
+      ROUTING = true;
+      try {
+        openPath(location.pathname, location.search);
+      } finally {
+        ROUTING = false;
+      }
+    }
   });
 })();

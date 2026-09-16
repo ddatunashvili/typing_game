@@ -1882,28 +1882,131 @@ body.spectating .code-area .ch.cur::after { display: none; }
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   gap: 10px;
 }
+/* An earned achievement is lit: its tier colour washes the card, the icon
+   glows, and the border carries the same light. A locked one is the same card
+   with the light off. Anything you hold should read as won from across the
+   room, which a flat card with a slightly tinted border did not. */
 .award {
+  position: relative;
   display: flex;
   gap: 12px;
   padding: 12px 14px;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--panel-2);
+  overflow: hidden;
+  transition: transform .14s ease, box-shadow .2s ease, border-color .2s ease;
+  /* every lit rule below reads this, so a tier is one line to add */
+  --lit: var(--accent);
 }
-.award-icon { font-size: 26px; line-height: 1.1; }
+.award.tier-bronze { --lit: #d08c54; }
+.award.tier-silver { --lit: #9fb2c8; }
+.award.tier-gold { --lit: var(--warn); }
+.award.tier-legend { --lit: #c79bff; }
+
+.award-icon {
+  font-size: 26px;
+  line-height: 1.1;
+  transition: filter .2s ease, transform .2s ease;
+}
 .award-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .award-name { font-size: 14px; }
 .award-blurb, .award-meta { font-size: 12px; }
-/* Locked achievements stay readable - greyed to the point of illegibility,
-   they stop being something to aim at. */
-.award.locked { opacity: .62; }
-.award.locked .award-icon { filter: grayscale(1); }
-.award.got { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
-.award.got.tier-gold { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
-.award.got.tier-legend {
-  border-color: color-mix(in srgb, #c79bff 55%, var(--line));
-  box-shadow: 0 0 18px color-mix(in srgb, #c79bff 16%, transparent);
+
+/* ---- the light off ---- */
+/* Still legible: greyed to the point of illegibility, a locked achievement
+   stops being something to aim at. */
+.award.locked { opacity: .6; }
+.award.locked .award-icon { filter: grayscale(1) brightness(.85); }
+
+/* ---- the light on ---- */
+.award.got {
+  border-color: color-mix(in srgb, var(--lit) 55%, var(--line));
+  background:
+    radial-gradient(
+      120% 140% at 0% 0%,
+      color-mix(in srgb, var(--lit) 20%, transparent),
+      transparent 60%
+    ),
+    var(--panel-2);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--lit) 22%, transparent),
+    0 0 22px color-mix(in srgb, var(--lit) 18%, transparent);
 }
+.award.got .award-name { color: color-mix(in srgb, var(--lit) 55%, var(--text)); }
+.award.got .award-icon {
+  filter: drop-shadow(0 0 7px color-mix(in srgb, var(--lit) 70%, transparent));
+}
+.award.got:hover {
+  transform: translateY(-2px);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--lit) 35%, transparent),
+    0 6px 28px color-mix(in srgb, var(--lit) 26%, transparent);
+}
+.award.got:hover .award-icon { transform: scale(1.08); }
+
+/* A sheen that crosses the card once on load, so a wall of earned cards
+   reads as lit rather than merely coloured. Held to one pass - a permanent
+   loop on thirty cards is a distraction, and it respects reduced motion. */
+.award.got::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    105deg,
+    transparent 35%,
+    color-mix(in srgb, var(--lit) 26%, transparent) 50%,
+    transparent 65%
+  );
+  transform: translateX(-120%);
+  animation: award-sheen 1.5s ease-out .15s 1 both;
+  pointer-events: none;
+}
+@keyframes award-sheen {
+  to { transform: translateX(120%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .award.got::after { animation: none; opacity: 0; }
+  .award { transition: none; }
+}
+
+/* The legend tier gets a slow pulse on top, because it should not look like
+   the gold one sitting next to it. */
+.award.got.tier-legend {
+  animation: legend-pulse 3.4s ease-in-out infinite;
+}
+@keyframes legend-pulse {
+  50% {
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--lit) 40%, transparent),
+      0 0 34px color-mix(in srgb, var(--lit) 32%, transparent);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .award.got.tier-legend { animation: none; }
+}
+
+/* The badge chips under a profile name are earned by definition, so they are
+   lit too - at chip scale. */
+.badge-chip {
+  border-color: color-mix(in srgb, var(--lit, var(--accent)) 45%, var(--line));
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--lit, var(--accent)) 14%, transparent),
+      transparent
+    ),
+    var(--panel-2);
+}
+.badge-chip.tier-bronze { --lit: #d08c54; }
+.badge-chip.tier-silver { --lit: #9fb2c8; }
+.badge-chip.tier-gold { --lit: var(--warn); }
+.badge-chip.tier-legend { --lit: #c79bff; }
+.badge-chip i {
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--lit, var(--accent)) 65%, transparent));
+}
+.badge-chip.more { --lit: var(--line); }
+.badge-chip.more i { filter: none; }
 .award-track {
   margin-top: 5px;
   height: 5px;
@@ -1917,3 +2020,140 @@ body.spectating .code-area .ch.cur::after { display: none; }
   width: 0;
   background: var(--accent-2);
 }
+
+/* ---------- searchable dropdown ----------
+   A native <select> of 250 countries can only be searched by first letter, and
+   its options cannot carry an image. This is the same shape as .lang-select so
+   it sits in a form row without looking like a different control. */
+.combo { position: relative; }
+.combo-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+}
+.combo-toggle:hover { border-color: var(--dim); }
+.combo-face { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 auto; }
+.combo-face > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.combo-caret { color: var(--muted); font-size: 11px; }
+
+.combo-pop {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, .45);
+}
+.combo-search { width: 100%; margin-bottom: 6px; }
+.combo-list { max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; }
+.combo-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+}
+.combo-item:hover,
+.combo-item.cursor { background: color-mix(in srgb, var(--text) 9%, var(--panel-2)); }
+.combo-item.on { color: var(--accent); }
+.combo-empty { margin: 6px 2px 2px; font-size: 12px; }
+
+/* The flag itself: an image, with the emoji put back underneath if the
+   request fails, so a blocked or offline browser is not left with a gap. */
+.flag {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  line-height: 1;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.flag img { display: block; border-radius: 2px; }
+.flag.flag-text { font-size: 14px; }
+.detail .flag { margin-right: 7px; vertical-align: -2px; }
+
+/* ---------- profile cover ----------
+   Sits behind the header, faded into the panel at the bottom so the name and
+   badges stay readable whatever image the player picked. */
+.hero-cover {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 190px;
+  background-size: cover;
+  background-position: center;
+  -webkit-mask-image: linear-gradient(180deg, #000 45%, transparent);
+  mask-image: linear-gradient(180deg, #000 45%, transparent);
+  opacity: .55;
+  pointer-events: none;
+}
+.panel.hero:has(.hero-cover:not(.hidden)) { padding-top: 84px; }
+.panel.hero:has(.hero-cover:not(.hidden)) .hero-glow { opacity: .4; }
+
+/* wide variants of the avatar cropper, for the banner */
+.drop.wide { min-height: 120px; }
+.crop.wide { flex-direction: column; align-items: stretch; }
+.crop-stage.wide {
+  width: 100%;
+  aspect-ratio: 32 / 9;
+  border-radius: 10px;
+  overflow: hidden;
+  cursor: grab;
+}
+.crop-stage.wide:active { cursor: grabbing; }
+.crop-stage.wide canvas { width: 100%; height: 100%; display: block; }
+
+/* ---------- keyword suggestion ----------
+   A small hint under the caret in a suggestions lobby. It must never sit over
+   the text it is describing, which is why it hangs below the line. */
+.suggest {
+  position: absolute;
+  z-index: 3;
+  transform: translate(-2px, 4px);
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--accent-2) 45%, var(--line));
+  background: var(--panel);
+  color: var(--accent-2);
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .35);
+}
+
+
+/* ---------- replay player ---------- */
+.modal-card.replay-card { max-width: min(1000px, calc(100vw - 40px)); }
+.rp-hud { margin: 6px 0 10px; }
+.replay-box { max-height: min(52vh, 520px); }
+.replay-box .code-area .ch { color: var(--dim); }
+.replay-box .code-area .ch.done { color: inherit; }
+.rp-ctl {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+.rp-ctl input[type="range"] { flex: 1 1 auto; accent-color: var(--accent); }
+.rp-speed { display: inline-flex; gap: 4px; }
+.rp-speed button { padding: 5px 9px; font-size: 12px; }
+.rp-speed button.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.react.play-btn { color: var(--accent-2); }
