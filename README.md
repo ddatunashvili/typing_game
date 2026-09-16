@@ -153,10 +153,48 @@ ready, so hitting **Ready** starts the race.
 
 ## Opponent carets
 
-While a race is running you see every other racer's caret in the code, in their own colour
-with their name on it. A caret that is ahead of yours pulses, so a rush is obvious. Carets
+While a race is running you see every other racer's caret in the code, in their own colour,
+with the name on hover. A caret that is ahead of yours pulses, so a rush is obvious. Carets
 only show for racers on the same snippet as you, which matters in timed mode where players
-drift apart in the playlist.
+drift apart in the playlist. While spectating the names are shown on the carets instead of
+on hover, since a watcher has no text of their own to read.
+
+## The code area
+
+Line numbers run down a gutter that scrolls with the code, an indent guide is drawn every
+four columns of leading whitespace, and the line being typed is banded and its number
+highlighted. The caret rides about a third of the way down the box so the next few lines
+are always readable; that, the gutter and the guides are each switchable under
+**appearance** in your profile.
+
+## Themes
+
+Five themes - Midnight, Dracula, Nord, Daylight and Paper - covering the whole app,
+including the syntax colours. The choice is written to `localStorage` and applied before
+the first paint (so there is no flash of the previous theme) and mirrored onto your account,
+so it follows you to another machine. A device that has already chosen keeps its own
+choice; the account copy only seeds a device that has not.
+
+## Giving up
+
+**Give up** appears while you are racing. It stops your run without ending the race for
+anyone else: the racers still typing keep claiming the real finishing places, and whoever
+resigned is slotted in behind them when the race closes, with no stars and the rating hit
+that last place earns.
+
+## Spectating
+
+Any unlocked lobby can be watched, from the **Spectate** button on its row in **Lobbies**
+or next to a player who is mid-race in **Players**. A spectator gets the same live feed as
+a racer - snippet, carets, progress bars, results - and can talk in chat, but is not in the
+roster and changes nothing about the race or the scoring. The lobby shows who is watching.
+
+## Lobbies
+
+**Lobbies** lists the rooms that are up, live. A public room shows its code, settings and
+who is in it, and anyone can Join or Spectate. A private room with a key is listed as
+locked and the key is the only way in - the code alone will not open it. A private room
+with no key is not listed at all, and only the invite link gets anybody in.
 
 ## Bot trash talk
 
@@ -201,14 +239,22 @@ and their race history. Your own avatar in the top bar opens yours.
 
 ## Find players and challenges
 
-**Players** lists everyone active recently, marking who is online and who is mid-race, and
-refreshes every 15 seconds.
+**Players** is a page of everyone active recently, marking who is online and who is
+mid-race. It is live: a second websocket, `/ws/user`, is held open for as long as your
+account is known, and that socket - not a poll - is what marks you online and carries
+invitations.
 
 - **Challenge** opens a lobby with your chosen language and race length and invites them.
-- A 20-second heartbeat keeps you on the online list and carries invitations back, so an
-  incoming challenge pops a toast wherever you are, with Accept / Later. The nav badge
-  counts what is waiting.
-- Invitations expire after 10 minutes, and only the addressee can accept one.
+  The invitation is pushed to them immediately, wherever they are in the app, as a toast
+  with Accept / Later. The nav badge counts what is waiting on you.
+- Accepting pushes the challenger into the lobby, and declining tells them so. Either side
+  can withdraw. A second invitation to the same player replaces the first rather than
+  stacking another toast on them.
+- If the challenger's lobby has gone by the time the invitation is answered, the lobby is
+  rebuilt from the invitation's own settings rather than failing.
+- Invitations expire after five minutes, and only the addressee can accept one.
+- `POST /api/heartbeat` remains as a fallback for a browser or proxy that will not hold a
+  websocket open.
 
 ## Reporting and moderation
 
@@ -286,6 +332,7 @@ layout does not jump when one appears.
 - Wrong key marks the character red and blocks — press the right key or Backspace.
 - Pressing Enter auto-skips the next line's indentation (like typer.io).
 - Untyped code is dimmed; typed code lights up in full syntax color.
+- **Give up** ends your run without ending the race for the others.
 
 ## Layout
 
@@ -317,8 +364,12 @@ Catalog and snippets:
   tags; `level` pins an exact level
 - `GET /api/playlist?lang=python&size=12&levels=&topics=` — an ordered run, for timed solo
 - `GET /api/config` — effective settings and where the library is being read from
-- `GET /api/lobby/new?lang=python&levels=&topics=&duration=60` — create lobby, returns code
+- `GET /api/lobby/new?lang=python&levels=&topics=&duration=60&private=0&key=&title=` —
+  create a lobby, returns its code
 - `GET /api/lobby/{code}` — lobby snapshot
+- `GET /api/lobbies` — the lobby browser: public rooms in full, keyed private rooms as
+  locked, keyless private rooms not at all
+- `POST /api/lobby/{code}/key` `{key}` — check a key before opening the socket
 - `GET /healthz` — liveness, lobby count, database state
 
 Accounts (all no-ops when no database is configured):
@@ -335,6 +386,8 @@ Accounts (all no-ops when no database is configured):
 - `GET /api/bot-avatar/{slug}` — bot portrait (imported artwork, else a generated identicon)
 - `GET /api/bot-card/{slug}` — the full bot character-card illustration
 - `GET /api/name-check?name=x` — is this display name free, plus suggestions if not
+- `GET|POST /api/settings` — client preferences (theme, gutter, guides) stored on the
+  account, so they follow the player to another machine
 
 Social:
 
@@ -346,17 +399,29 @@ Social:
 - `POST /api/posts/{id}/react` `{value: 1 | -1 | 0}`
 - `GET|POST /api/posts/{id}/comments`, `DELETE /api/comments/{id}`, `DELETE /api/posts/{id}`
 - `POST /api/report` `{kind, id, reason, note}`
-- `GET /api/players` — who is around; `POST /api/heartbeat` — presence + invitations
+- `GET /api/players` — who is around, with a `watch` lobby code for anyone mid-race;
+  `POST /api/heartbeat` — the fallback for a tab with no websocket
 - `POST /api/challenge` `{to, lang, levels, topics, duration}`
-- `GET /api/challenges`, `POST /api/challenges/{id}/accept|decline`
+- `GET /api/challenges`, `POST /api/challenges/{id}/accept|decline|cancel`
 - `POST /api/race` — record a solo result (lobby races are recorded server-side)
 
 Websocket `WS /ws/{code}?name=&pid=&create=0|1&lang=&levels=&topics=&duration=`
+`&spectate=0|1&key=&private=0|1&title=`
 
 Client → server: `chat`, `ready`, `start`, `restart`, `again`, `lang`, `filters`,
-`duration`, `bot`, `unbot`, `progress`, `finish` — `again` swaps the snippet, `restart`
-starts another race, `bot`/`unbot` seat and remove a bot (host only)
+`duration`, `bot`, `unbot`, `progress`, `finish`, `resign` — `again` swaps the snippet,
+`restart` starts another race, `bot`/`unbot` seat and remove a bot (host only), `resign`
+gives up without ending the race. With `spectate=1` the connection watches instead of
+racing and only `chat` is accepted from it.
 Server → client: `hello`, `state`, `chat`, `countdown`, `go`, `prog`, `time_up`, `error`
+
+Notification websocket `WS /ws/user` — one per tab, authenticated by the recognition
+cookie. Holding it open is what marks the account online.
+
+Server → client: `ready`, `challenges`, `challenge_accepted`, `challenge_declined`,
+`challenge_cancelled`, `presence` (the online list moved), `lobbies` (the room list moved),
+`ping`
+Client → server: `pong`, `challenges` (resend the list)
 
 ## Where the snippets live
 

@@ -101,6 +101,9 @@
     runStars: $("runStars"),
     runTitle: $("runTitle"),
     ghosts: $("ghosts"),
+    gutter: $("gutter"),
+    lineGlow: $("lineGlow"),
+    resign: $("resignBtn"),
     winModal: $("winModal"),
     winStars: $("winStars"),
     winTitle: $("winTitle"),
@@ -135,6 +138,110 @@
     }
   }
 
+  /* ---------- themes and display preferences ----------
+     The browser is the source of truth: the choice is written to localStorage
+     first (and applied to <html> straight away) so it survives a reload with
+     no network, then mirrored onto the account so it follows the player to
+     another machine. index.html applies the stored theme before first paint. */
+  const THEMES = [
+    { id: "dark", label: "Midnight", swatch: ["#0d0f14", "#6fe3a1", "#62b6ff"] },
+    { id: "dracula", label: "Dracula", swatch: ["#1a1b26", "#50fa7b", "#ff79c6"] },
+    { id: "nord", label: "Nord", swatch: ["#2e3440", "#a3be8c", "#88c0d0"] },
+    { id: "light", label: "Daylight", swatch: ["#f5f6f8", "#10a35f", "#2a72d4"] },
+    { id: "paper", label: "Paper", swatch: ["#f4efe4", "#1f7a4d", "#2f6bb0"] },
+  ];
+  const THEME_IDS = THEMES.map((t) => t.id);
+
+  const DISPLAY = {
+    theme: "dark",
+    lineNumbers: true,
+    indentGuides: true,
+    caretScroll: true,
+  };
+
+  function loadDisplay() {
+    try {
+      const theme = localStorage.getItem("cr_theme");
+      if (theme && THEME_IDS.indexOf(theme) >= 0) DISPLAY.theme = theme;
+      const raw = JSON.parse(localStorage.getItem("cr_display") || "{}");
+      for (const key of ["lineNumbers", "indentGuides", "caretScroll"]) {
+        if (typeof raw[key] === "boolean") DISPLAY[key] = raw[key];
+      }
+    } catch (err) {
+      /* a blocked or corrupt store just means the defaults */
+    }
+    applyDisplay();
+  }
+
+  function applyDisplay() {
+    document.documentElement.setAttribute("data-theme", DISPLAY.theme);
+    document.documentElement.classList.toggle("no-lines", !DISPLAY.lineNumbers);
+    document.documentElement.classList.toggle("no-guides", !DISPLAY.indentGuides);
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) {
+      const bg = getComputedStyle(document.documentElement)
+        .getPropertyValue("--bg")
+        .trim();
+      if (bg) meta.setAttribute("content", bg);
+    }
+    const scheme = document.querySelector('meta[name="color-scheme"]');
+    if (scheme) {
+      const light = DISPLAY.theme === "light" || DISPLAY.theme === "paper";
+      scheme.setAttribute("content", light ? "light" : "dark");
+    }
+    // the gutter changes the code width, so anything measured from it is stale
+    if (T.chars && T.chars.length) requestAnimationFrame(remeasure);
+  }
+
+  /** Persist locally at once, then mirror onto the account if there is one. */
+  function saveDisplay() {
+    try {
+      localStorage.setItem("cr_theme", DISPLAY.theme);
+      localStorage.setItem(
+        "cr_display",
+        JSON.stringify({
+          lineNumbers: DISPLAY.lineNumbers,
+          indentGuides: DISPLAY.indentGuides,
+          caretScroll: DISPLAY.caretScroll,
+        })
+      );
+    } catch (err) {
+      /* private mode: the account copy below is the fallback */
+    }
+    applyDisplay();
+    if (!S.me) return;
+    fetch("/api/settings", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        theme: DISPLAY.theme,
+        lineNumbers: DISPLAY.lineNumbers,
+        indentGuides: DISPLAY.indentGuides,
+        caretScroll: DISPLAY.caretScroll,
+      }),
+    }).catch(() => {});
+  }
+
+  /** Settings that arrived with the account, for a browser that has none yet. */
+  function adoptDisplay(settings) {
+    if (!settings) return;
+    let stored = null;
+    try {
+      stored = localStorage.getItem("cr_theme");
+    } catch (err) {
+      stored = null;
+    }
+    if (stored) return;  // this device has already chosen
+    if (settings.theme && THEME_IDS.indexOf(settings.theme) >= 0) {
+      DISPLAY.theme = settings.theme;
+    }
+    for (const key of ["lineNumbers", "indentGuides", "caretScroll"]) {
+      if (typeof settings[key] === "boolean") DISPLAY[key] = settings[key];
+    }
+    applyDisplay();
+  }
+
   const S = {
     meta: null,
     lang: localStorage.getItem("cr_lang") || "python",
@@ -147,6 +254,8 @@
     ws: null,
     room: null,
     solo: false,
+    spectating: false,  // watching a lobby rather than racing in it
+    lobbyKey: "",       // key for the private lobby being joined
     lobby: null,
     snipLevel: "",
     snipTopic: "",
@@ -225,6 +334,11 @@
   const T = {
     code: "",
     chars: [],
+    lineOf: [],     // character index -> 0-based line number
+    lineTops: [],   // line number -> offsetTop, measured once per snippet
+    lineNodes: [],  // line number -> gutter <i>
+    curSpan: null,  // the span currently wearing .cur
+    curLine: -1,
     pos: 0,
     typed: 0,
     errors: 0,
@@ -260,6 +374,82 @@
     return out;
   }
 
+  /* Tab stop used for the indent guides. Matches `tab-size: 4` in the CSS. */
+  const INDENT = 4;
+
+  /**
+   * Mark the leading whitespace so the CSS can draw a rule every four columns,
+   * and remember which line each character is on. Doing both in one walk keeps
+   * it to a single pass over the snippet.
+   */
+  function indexLines(code) {
+    const lineOf = new Array(code.length);
+    let line = 0;
+    let col = 0;
+    let leading = true;
+    for (let i = 0; i < code.length; i++) {
+      const ch = code[i];
+      lineOf[i] = line;
+      if (ch === "\n") {
+        line++;
+        col = 0;
+        leading = true;
+        continue;
+      }
+      if (leading && (ch === " " || ch === "\t")) {
+        if (col % INDENT === 0) T.chars[i].classList.add("ig");
+        col += ch === "\t" ? INDENT : 1;
+      } else {
+        leading = false;
+        col += 1;
+      }
+    }
+    T.lineOf = lineOf;
+    return line + 1;
+  }
+
+  /** One <i> per source line. Same font metrics as the code, so it lines up. */
+  function buildGutter(lines) {
+    if (!el.gutter) return;
+    const frag = document.createDocumentFragment();
+    T.lineNodes = [];
+    for (let n = 1; n <= lines; n++) {
+      const item = document.createElement("i");
+      item.textContent = n;
+      frag.appendChild(item);
+      T.lineNodes.push(item);
+    }
+    el.gutter.innerHTML = "";
+    el.gutter.appendChild(frag);
+    // widen the gutter for a long snippet so the digits never touch the code
+    el.codeBox.style.setProperty("--ln-w", String(lines).length + 0.5 + "ch");
+  }
+
+  /**
+   * offsetTop of the first character on each line, measured once. Reading it
+   * per keystroke forced a layout on every key, which is what made the caret
+   * lag behind on a long snippet.
+   */
+  function remeasure() {
+    if (!T.chars.length) return;
+    measureLines();
+    T.curLine = -1;
+    markLine();
+  }
+
+  function measureLines() {
+    T.lineTops = [];
+    let line = -1;
+    for (let i = 0; i < T.chars.length; i++) {
+      const at = T.lineOf[i];
+      if (at !== line) {
+        line = at;
+        T.lineTops[at] = T.chars[i].offsetTop;
+      }
+    }
+    if (!T.lineTops.length && T.chars.length) T.lineTops[0] = T.chars[0].offsetTop;
+  }
+
   function renderCode(code, lang) {
     T.code = code;
     el.codeArea.innerHTML = Prism.highlight(code, grammarFor(lang), lang);
@@ -269,6 +459,11 @@
       el.codeArea.textContent = code;
       T.chars = wrapChars(el.codeArea);
     }
+    T.curSpan = null;
+    T.curLine = -1;
+    const lines = indexLines(code);
+    buildGutter(lines);
+    measureLines();
     resetRun();
   }
 
@@ -280,28 +475,71 @@
     T.startedAt = 0;
     T.running = false;
     cancelAnimationFrame(T.raf);
-    for (const span of T.chars) span.className = span.className.replace(/ (done|cur|bad)/g, "");
+    for (const span of T.chars) span.classList.remove("done", "cur", "bad");
+    T.curSpan = null;
+    T.curLine = -1;
     el.codeBox.scrollTop = 0;
     paintHud(0, 100, 0);
     el.hudLeft.textContent = T.code.length;
     markCursor();
   }
 
+  /**
+   * Move the caret. Only the two spans that change are touched - the old
+   * version swept the whole snippet on every keystroke, so the caret fell
+   * further behind the typing the longer the snippet was.
+   */
   function markCursor() {
-    for (const span of T.chars) span.classList.remove("cur");
-    const span = T.chars[T.pos];
+    if (T.curSpan) T.curSpan.classList.remove("cur");
+    const span = T.chars[T.pos] || null;
+    T.curSpan = span;
     if (span) span.classList.add("cur");
+    markLine();
   }
 
+  function lineHeight() {
+    if (T.lineTops.length > 1) return T.lineTops[1] - T.lineTops[0];
+    const probe = T.chars[0];
+    return (probe && probe.offsetHeight) || 29;
+  }
+
+  /** Highlight the line being typed, in the gutter and behind the code. */
+  function markLine() {
+    const line = T.lineOf[Math.min(T.pos, T.lineOf.length - 1)] || 0;
+    if (line === T.curLine) return;
+    if (T.lineNodes[T.curLine]) T.lineNodes[T.curLine].classList.remove("on");
+    T.curLine = line;
+    if (T.lineNodes[line]) T.lineNodes[line].classList.add("on");
+    if (el.lineGlow) {
+      const top = T.lineTops[line];
+      el.lineGlow.style.transform = "translateY(" + (top == null ? 0 : top) + "px)";
+    }
+  }
+
+  /**
+   * Keep the caret inside a comfortable band rather than only nudging it when
+   * it leaves the box. With "keep the caret centred" on it rides a third of
+   * the way down, so the next few lines are always already readable.
+   */
   function scrollToCursor() {
-    const span = T.chars[T.pos];
-    if (!span) return;
+    if (!T.chars.length) return;
     const box = el.codeBox;
-    const top = span.offsetTop;
-    const h = span.offsetHeight || 24;
-    if (top < box.scrollTop + 24) box.scrollTop = Math.max(0, top - 24);
-    else if (top + h > box.scrollTop + box.clientHeight - 24)
-      box.scrollTop = top + h - box.clientHeight + 24;
+    const line = T.lineOf[Math.min(T.pos, T.lineOf.length - 1)] || 0;
+    const top = T.lineTops[line];
+    if (top == null) return;
+    const h = lineHeight();
+    const view = box.clientHeight;
+    if (box.scrollHeight <= view) return;  // nothing to scroll
+
+    if (DISPLAY.caretScroll) {
+      const want = top - view * 0.38;
+      box.scrollTop = Math.max(0, Math.min(box.scrollHeight - view, want));
+      return;
+    }
+    const pad = h * 2;
+    if (top < box.scrollTop + pad) box.scrollTop = Math.max(0, top - pad);
+    else if (top + h > box.scrollTop + view - pad)
+      box.scrollTop = Math.min(box.scrollHeight - view, top + h - view + pad);
   }
 
   function armRace(endsAtMs) {
@@ -416,7 +654,7 @@
   }
 
   function onKeyDown(e) {
-    if (!T.running) return;
+    if (!T.running || S.spectating) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key === "Backspace") { e.preventDefault(); backspace(); return; }
     if (e.key === "Enter") { e.preventDefault(); typeChar("\n"); return; }
@@ -857,9 +1095,12 @@
       el.ghosts.innerHTML = "";
       return;
     }
+    // Watching: nobody is typing here, so the carets get names on them and the
+    // race is readable from the outside.
+    el.ghosts.classList.toggle("labelled", !!S.spectating);
     const alive = new Set();
     for (const p of S.lobby.players) {
-      if (p.id === S.pid || p.finished) continue;
+      if (p.id === S.pid || (p.finished && !S.spectating)) continue;
       // only show racers working on the same snippet as me
       if ((p.idx || 0) !== R.idx) continue;
       const span = T.chars[Math.min(p.pos || 0, T.chars.length - 1)];
@@ -870,13 +1111,16 @@
         node = document.createElement("i");
         node.className = "peer";
         node.dataset.id = p.id;
+        node.appendChild(document.createElement("b"));
         el.ghosts.appendChild(node);
       }
+      const label = node.querySelector("b");
+      if (label) label.textContent = p.name;
       node.style.setProperty("--c", ghostColor(p.id));
       node.style.left = span.offsetLeft + "px";
       node.style.top = span.offsetTop + "px";
       node.style.height = (span.offsetHeight || 22) + "px";
-      node.title = p.name;  // hover only: a visible label covered the code
+      node.title = p.name;  // hover only while racing: a label covers the code
       // flag whoever is ahead of me, so a rush is obvious
       const me = S.lobby.players.find((x) => x.id === S.pid);
       node.classList.toggle("ahead", !!me && (p.progress || 0) > (me.progress || 0));
@@ -912,6 +1156,7 @@
       S.me = null;
     }
     paintProfile();
+    if (S.me && S.me.settings) adoptDisplay(S.me.settings);
     if (S.accounts) loadLeaderboard();
     if (S.me) startHeartbeat();
   }
@@ -944,7 +1189,53 @@
     }
   }
 
+  /* One swatch per theme. Clicking applies it immediately - a theme you have
+     to save before you can see is a theme nobody tries. */
+  function renderThemes() {
+    const grid = el2("themeGrid");
+    if (!grid) return;
+    grid.innerHTML = "";
+    for (const theme of THEMES) {
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = "theme-card" + (theme.id === DISPLAY.theme ? " on" : "");
+      card.dataset.theme = theme.id;
+      card.innerHTML =
+        '<span class="theme-swatch">' +
+        theme.swatch
+          .map((c) => '<i style="background:' + c + '"></i>')
+          .join("") +
+        '</span><span class="theme-name"></span>';
+      card.querySelector(".theme-name").textContent = theme.label;
+      card.onclick = () => {
+        DISPLAY.theme = theme.id;
+        saveDisplay();
+        renderThemes();
+      };
+      grid.appendChild(card);
+    }
+  }
+
+  function wireDisplayToggles() {
+    const pairs = [
+      ["optLineNumbers", "lineNumbers"],
+      ["optIndentGuides", "indentGuides"],
+      ["optCaretScroll", "caretScroll"],
+    ];
+    for (const [id, key] of pairs) {
+      const box = el2(id);
+      if (!box) continue;
+      box.checked = DISPLAY[key];
+      box.onchange = () => {
+        DISPLAY[key] = box.checked;
+        saveDisplay();
+      };
+    }
+  }
+
   function openProfile() {
+    renderThemes();
+    wireDisplayToggles();
     el.pfErr.textContent = "";
     el.pfAvatar.value = "";
     el.pfTitle.textContent = "Your profile";
@@ -1206,8 +1497,11 @@
     });
   }
 
-  function connect(code, create) {
+  function connect(code, create, opts) {
+    opts = opts || {};
     if (S.ws) { S.ws.onclose = null; S.ws.close(); }
+    S.spectating = !!opts.spectate;
+    S.lobby = null;  // a stale lobby made the next state look unchanged
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const qs = new URLSearchParams({
       name: currentName(),
@@ -1217,6 +1511,10 @@
       levels: S.levels.join(","),
       topics: S.topics.join(","),
       duration: String(S.duration == null ? -1 : S.duration),
+      spectate: opts.spectate ? "1" : "0",
+      key: opts.key != null ? opts.key : S.lobbyKey || "",
+      private: opts.private ? "1" : "0",
+      title: opts.title || "",
     });
     const ws = new WebSocket(proto + "//" + location.host + "/ws/" + code + "?" + qs);
     S.ws = ws;
@@ -1232,6 +1530,7 @@
       case "hello":
         S.pid = m.id;
         S.room = m.code;
+        S.spectating = !!m.spectator;
         localStorage.setItem("cr_pid", m.id);
         el.name.value = m.name;
         el.roomCode.textContent = m.code;
@@ -1241,7 +1540,12 @@
         break;
       case "error":
         showHome();
-        el.homeErr.textContent = m.code === "no_lobby" ? "lobby not found" : "connection error";
+        el.homeErr.textContent =
+          m.code === "no_lobby"
+            ? "lobby not found"
+            : m.code === "bad_key"
+            ? "that lobby needs a key"
+            : "connection error";
         break;
       case "chat":
         addChat(m);
@@ -1257,6 +1561,7 @@
         break;
       case "go":
         el.countdown.classList.add("hidden");
+        if (S.spectating) break;
         if (S.lobby) {
           initRun(S.lobby.duration > 0, S.lobby.playlist || []);
           const first = R.playlist[0];
@@ -1289,10 +1594,17 @@
     renderRoomFilters(st);
     renderRoomDurations(st);
 
-    const isHost = st.host === S.pid;
-    const me = st.players.find((p) => p.id === S.pid);
-    el.ready.classList.toggle("hidden", st.state !== "waiting");
+    const watching = S.spectating;
+    const isHost = !watching && st.host === S.pid;
+    const me = watching ? null : st.players.find((p) => p.id === S.pid);
+    el.ready.classList.toggle("hidden", watching || st.state !== "waiting");
     el.start.classList.toggle("hidden", !(isHost && st.state === "waiting"));
+    // Give up is only offered to someone actually racing and still going.
+    el.resign.classList.toggle(
+      "hidden",
+      !(!watching && st.state === "racing" && me && !me.finished)
+    );
+    paintWatchers(st);
     const over = st.state === "finished";
     el.again.classList.toggle("hidden", !(isHost && over));
     el.newSnip.classList.toggle("hidden", !(isHost && over));
@@ -1307,15 +1619,23 @@
       el.ready.classList.toggle("accent", !!me.ready);
     }
 
-    // Only a running race is off limits: during the countdown we want the new
-    // snippet on screen already, so players can read ahead.
-    const armed = st.state === "racing";
+    // Only a running race is off limits for a racer: during the countdown the
+    // new snippet should already be on screen so they can read ahead.
+    // A spectator, and anyone who walked in mid-race, is not typing, so they
+    // get the snippet immediately - without this they sat in front of an empty
+    // code area until the round ended.
+    const idle = watching || !me || me.finished;
+    const armed = st.state === "racing" && !idle;
     if (!armed && (!prev || prev.state !== st.state || prev.snippet !== st.snippet)) {
       initRun(st.duration > 0, st.playlist || []);
     }
 
-    const snippetChanged = !prev || prev.snippet !== st.snippet || prev.language !== st.language;
-    if (snippetChanged && !armed) renderCode(st.snippet, st.language);
+    const snippetChanged =
+      !prev || prev.snippet !== st.snippet || prev.language !== st.language;
+    if ((snippetChanged && !armed) || (!T.chars.length && st.snippet)) {
+      renderCode(st.snippet, st.language);
+    }
+    if (idle) el.codeBox.classList.add("locked");
 
     if (st.state === "waiting" || st.state === "finished") {
       stopRace();
@@ -1338,7 +1658,7 @@
       "hidden",
       !(isHost && (st.state === "waiting" || st.state === "finished"))
     );
-    if (st.state === "racing" && !T.running && !R.over && me && !me.finished) {
+    if (!watching && st.state === "racing" && !T.running && !R.over && me && !me.finished) {
       // ends_at is a unix time in seconds; the server ends the race either way.
       const leftMs = st.ends_at ? st.ends_at * 1000 - Date.now() : 0;
       armRace(st.duration > 0 ? performance.now() + Math.max(0, leftMs) : null);
@@ -1661,9 +1981,7 @@
   }
 
   function showRanks() {
-    el.home.classList.add("hidden");
-    el.room.classList.add("hidden");
-    el.ranks.classList.remove("hidden");
+    screenOnly(el.ranks);
     loadRankings();
     clearInterval(S.ranksTimer);
     // live board: re-read while the page is open
@@ -1675,9 +1993,7 @@
 
   function hideRanks() {
     clearInterval(S.ranksTimer);
-    el.ranks.classList.add("hidden");
-    if (S.room) el.room.classList.remove("hidden");
-    else el.home.classList.remove("hidden");
+    backToGame();
   }
 
   // ---------- screens ----------
@@ -1690,10 +2006,14 @@
   function showHome() {
     S.room = null;
     S.solo = false;
+    S.spectating = false;
+    S.lobbyKey = "";
+    document.body.classList.remove("spectating");
     stopRace();
     hideRun();
     el.ranks.classList.add("hidden");
-    for (const id of ["screen-feed", "screen-players", "screen-user", "screen-snippets"]) {
+    for (const id of ["screen-feed", "screen-players", "screen-user", "screen-snippets",
+                     "screen-lobbies"]) {
       const node = document.getElementById(id);
       if (node) node.classList.add("hidden");
     }
@@ -1703,13 +2023,20 @@
     el.leave.classList.add("hidden");
     el.name.disabled = false;
     el.roomFilters.classList.add("hidden");
+    el.resign.classList.add("hidden");
+    const tag = el2("watchTag");
+    if (tag) tag.classList.add("hidden");
+    const watchers = el2("watchers");
+    if (watchers) watchers.classList.add("hidden");
     history.replaceState(null, "", "/");
     renderFilters();
+    paintBackButton();
   }
 
   function showRoom() {
     el.ranks.classList.add("hidden");
-    for (const id of ["screen-feed", "screen-players", "screen-user", "screen-snippets"]) {
+    for (const id of ["screen-feed", "screen-players", "screen-user", "screen-snippets",
+                     "screen-lobbies"]) {
       const node = document.getElementById(id);
       if (node) node.classList.add("hidden");
     }
@@ -1719,15 +2046,66 @@
     el.room.classList.remove("hidden");
     el.leave.classList.remove("hidden");
     el.name.disabled = true;
+    // A spectator keeps the chat and the racer bars, and loses everything that
+    // would change the race.
+    const watching = S.spectating;
     document.querySelector(".chat").classList.toggle("hidden", S.solo);
     el.racers.classList.toggle("hidden", S.solo);
-    el.ready.classList.toggle("hidden", S.solo);
-    el.start.classList.toggle("hidden", S.solo);
-    el.filterBtn.classList.toggle("hidden", S.solo);
-    el.newSnip.classList.toggle("hidden", S.solo);
-    el.addBotBtn.classList.toggle("hidden", S.solo);
+    el.ready.classList.toggle("hidden", S.solo || watching);
+    el.start.classList.toggle("hidden", S.solo || watching);
+    el.filterBtn.classList.toggle("hidden", S.solo || watching);
+    el.newSnip.classList.toggle("hidden", S.solo || watching);
+    el.addBotBtn.classList.toggle("hidden", S.solo || watching);
+    el.resign.classList.add("hidden");
+    el.langSelect.disabled = watching;
     document.querySelector(".room-meta").classList.toggle("hidden", S.solo);
-    focusTrap();
+    document.body.classList.toggle("spectating", watching);
+    // the code box was display:none until a moment ago, so every offset read
+    // before this point was zero
+    requestAnimationFrame(remeasure);
+    const tag = el2("watchTag");
+    if (tag) tag.classList.toggle("hidden", !watching);
+    if (watching) {
+      el.codeBox.classList.add("locked");
+      el.hint.textContent = "watching - you can talk in chat, but not type";
+    } else {
+      focusTrap();
+    }
+    paintBackButton();
+  }
+
+  /** The strip of people watching this lobby. */
+  function paintWatchers(st) {
+    const bar = el2("watchers");
+    if (!bar) return;
+    const rows = st.watchers || [];
+    bar.innerHTML = "";
+    bar.classList.toggle("hidden", rows.length === 0);
+    if (!rows.length) return;
+    const label = document.createElement("span");
+    label.className = "muted";
+    label.textContent = rows.length === 1 ? "1 watching:" : rows.length + " watching:";
+    bar.appendChild(label);
+    for (const w of rows) {
+      const chip = document.createElement("span");
+      chip.className = "watcher";
+      chip.innerHTML = '<span class="avatar sm"></span><span class="nm"></span>';
+      paintAvatar(chip.querySelector(".avatar"), w);
+      chip.querySelector(".nm").textContent = w.name;
+      bar.appendChild(chip);
+    }
+  }
+
+  /** Stop racing but stay in the room. */
+  function giveUp() {
+    if (S.spectating || S.solo) return;
+    if (!S.lobby || S.lobby.state !== "racing") return;
+    el.resign.classList.add("hidden");
+    stopRace();
+    R.over = true;
+    el.codeBox.classList.add("locked");
+    el.hint.textContent = "you gave up - the race carries on without you";
+    send({ t: "resign" });
   }
 
   async function startSolo() {
@@ -1883,6 +2261,7 @@
   function joinLobby(code) {
     el.homeErr.textContent = "";
     S.solo = false;
+    S.lobbyKey = "";
     connect(code.toUpperCase(), false);
   }
 
@@ -2065,10 +2444,17 @@
   const SOCIAL = {
     feedBefore: 0,
     playersTimer: 0,
+    lobbiesTimer: 0,
     beatTimer: 0,
     report: null,        // {kind, id, label}
     shownChallenges: new Set(),
     viewing: 0,          // profile being looked at
+    ws: null,            // notification socket
+    wsRetry: 0,          // reconnect backoff, in ms
+    wsTimer: 0,
+    toastTimer: 0,
+    incoming: [],        // invitations waiting on an answer
+    outgoing: [],
   };
 
   function el2(id) {
@@ -2096,15 +2482,31 @@
   function screenOnly(node) {
     for (const s of [el.home, el.room, el.ranks, el2("screen-feed"),
                      el2("screen-players"), el2("screen-user"),
-                     el2("screen-snippets")]) {
+                     el2("screen-snippets"), el2("screen-lobbies")]) {
       if (s) s.classList.toggle("hidden", s !== node);
     }
     clearInterval(S.ranksTimer);
     clearInterval(SOCIAL.playersTimer);
+    clearInterval(SOCIAL.lobbiesTimer);
+    paintBackButton();
+    // body does not scroll - each screen is its own scroll container
+    if (node && node.scrollTo) node.scrollTo(0, 0);
   }
 
   function backToGame() {
     screenOnly(S.room ? el.room : el.home);
+  }
+
+  /* The way back is always on screen, whichever page is open. It says where it
+     goes, because "back" means the lobby mid-race and the home page otherwise. */
+  function paintBackButton() {
+    const btn = el2("backBtn");
+    if (!btn) return;
+    const onGame = isOpen("screen-home") || isOpen("screen-room");
+    btn.classList.toggle("hidden", onGame);
+    btn.textContent = S.room
+      ? S.spectating ? "back to the race" : "back to your lobby"
+      : "back to the game";
   }
 
   /* ---------- posts ---------- */
@@ -2439,13 +2841,23 @@
       p.rank + (p.racing ? " · in a race" : p.online ? "" : " · " + idleText(p.idle));
     row.querySelector(".rk-rate").textContent = p.rating;
 
+    const act = row.querySelector(".rk-act");
+    if (!p.me && p.watch) {
+      // Mid-race: watching is the only thing you can usefully do with them.
+      const eye = document.createElement("button");
+      eye.type = "button";
+      eye.className = "primary";
+      eye.textContent = "Spectate";
+      eye.onclick = () => spectate(p.watch);
+      act.appendChild(eye);
+    }
     if (!p.me && S.me) {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "ghost";
       btn.textContent = "Challenge";
       btn.onclick = () => challengePlayer(p.id, p.name, btn);
-      row.querySelector(".rk-act").appendChild(btn);
+      act.appendChild(btn);
     }
     return row;
   }
@@ -2469,12 +2881,191 @@
 
   function showPlayers() {
     screenOnly(el2("screen-players"));
+    fillSelect(el2("chLang"), (S.meta && S.meta.catalog) || [], S.lang);
     loadPlayers();
     clearInterval(SOCIAL.playersTimer);
+    // The notification socket pushes a "presence" event on every join and
+    // leave, so this is only a safety net for a tab whose socket is down.
     SOCIAL.playersTimer = setInterval(() => {
-      if (!el2("screen-players").classList.contains("hidden")) loadPlayers();
+      if (isOpen("screen-players")) loadPlayers();
       else clearInterval(SOCIAL.playersTimer);
-    }, 15000);
+    }, 30000);
+  }
+
+  /* ---------- lobby browser ---------- */
+  function lobbyRow(r) {
+    const row = document.createElement("div");
+    row.className = "lobby-row" + (r.locked ? " locked" : "");
+    row.innerHTML =
+      '<span class="lb-code"></span>' +
+      '<span class="lb-main"><b class="lb-title"></b><span class="lb-sub muted"></span></span>' +
+      '<span class="badge lb-state"></span>' +
+      '<span class="lb-people muted"></span>' +
+      '<span class="lb-act"></span>';
+
+    row.querySelector(".lb-code").textContent = r.locked ? "\u{1f512}" : r.code;
+    row.querySelector(".lb-title").textContent =
+      r.title || (r.host ? r.host + "'s lobby" : "open lobby");
+
+    const mode = r.duration ? r.duration + "s run" : "one snippet";
+    const bits = [r.language, mode];
+    if (r.levels && r.levels.length) bits.push(r.levels.join("/"));
+    if (r.topics && r.topics.length) bits.push(r.topics.join("/"));
+    row.querySelector(".lb-sub").textContent = bits.join(" \u00b7 ");
+
+    const state = row.querySelector(".lb-state");
+    state.textContent = r.state;
+    state.className = "badge lb-state " + r.state;
+
+    const people = [r.humans + (r.humans === 1 ? " player" : " players")];
+    if (r.bots) people.push(r.bots + " bot" + (r.bots === 1 ? "" : "s"));
+    if (r.watchers) people.push(r.watchers + " watching");
+    const who = row.querySelector(".lb-people");
+    who.textContent = people.join(" \u00b7 ");
+    who.title = (r.names || []).join(", ");
+
+    const act = row.querySelector(".lb-act");
+    const join = document.createElement("button");
+    join.type = "button";
+    join.className = "accent";
+    join.textContent = r.locked ? "Enter key" : "Join";
+    join.onclick = () => joinListed(r);
+    act.appendChild(join);
+
+    if (!r.locked) {
+      const eye = document.createElement("button");
+      eye.type = "button";
+      eye.className = "ghost";
+      eye.textContent = "Spectate";
+      eye.onclick = () => spectate(r.code);
+      act.appendChild(eye);
+    }
+    return row;
+  }
+
+  function joinListed(r) {
+    if (!r.locked) {
+      joinLobby(r.code);
+      return;
+    }
+    openKeyPrompt(r);
+  }
+
+  function openKeyPrompt(r) {
+    const modal = el2("keyModal");
+    if (!modal) return;
+    el2("keyTitle").textContent = "Lobby " + r.code + " is private";
+    el2("keyInput").value = "";
+    el2("keyErr").textContent = "";
+    modal.dataset.code = r.code;
+    modal.classList.remove("hidden");
+    el2("keyInput").focus();
+  }
+
+  function closeKeyPrompt() {
+    const modal = el2("keyModal");
+    if (modal) modal.classList.add("hidden");
+  }
+
+  async function submitKey() {
+    const modal = el2("keyModal");
+    if (!modal) return;
+    const code = modal.dataset.code || "";
+    const key = el2("keyInput").value.trim();
+    const err = el2("keyErr");
+    err.textContent = "";
+    if (!key) {
+      err.textContent = "the key is required";
+      return;
+    }
+    try {
+      const res = await fetch("/api/lobby/" + encodeURIComponent(code) + "/key", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ key }),
+      });
+      if (!res.ok) {
+        err.textContent = res.status === 404 ? "that lobby has closed" : "wrong key";
+        return;
+      }
+    } catch (e) {
+      err.textContent = "network error";
+      return;
+    }
+    closeKeyPrompt();
+    S.solo = false;
+    S.lobbyKey = key;
+    connect(code, false);
+  }
+
+  async function loadLobbies() {
+    const list = el2("lobbyList");
+    if (!list) return;
+    try {
+      const res = await fetch("/api/lobbies");
+      const d = await res.json();
+      const rows = d.lobbies || [];
+      list.innerHTML = "";
+      for (const r of rows) list.appendChild(lobbyRow(r));
+      el2("lobbyCount").textContent =
+        rows.length + (rows.length === 1 ? " lobby open" : " lobbies open");
+      el2("lobbyEmpty").classList.toggle("hidden", rows.length > 0);
+    } catch (err) {
+      list.innerHTML = '<p class="err">could not load the lobby list</p>';
+    }
+  }
+
+  function showLobbies() {
+    screenOnly(el2("screen-lobbies"));
+    fillSelect(el2("newLang"), (S.meta && S.meta.catalog) || [], S.lang);
+    loadLobbies();
+    clearInterval(SOCIAL.lobbiesTimer);
+    SOCIAL.lobbiesTimer = setInterval(() => {
+      if (isOpen("screen-lobbies")) loadLobbies();
+      else clearInterval(SOCIAL.lobbiesTimer);
+    }, 30000);
+  }
+
+  /** Open a room from the browser's create panel. */
+  async function createListedLobby() {
+    const btn = el2("newLobbyGo");
+    const err = el2("newLobbyErr");
+    err.textContent = "";
+    const priv = el2("newPrivate").checked;
+    const key = el2("newKey").value.trim();
+    if (priv && key.length && key.length < 3) {
+      err.textContent = "a key needs at least three characters";
+      return;
+    }
+    btn.disabled = true;
+    try {
+      const qs = new URLSearchParams({
+        lang: el2("newLang").value || S.lang,
+        levels: S.levels.join(","),
+        topics: S.topics.join(","),
+        duration: String(parseInt(el2("newDuration").value || "0", 10)),
+        private: priv ? "1" : "0",
+        key: priv ? key : "",
+        title: el2("newTitle").value.trim().slice(0, 40),
+      });
+      const res = await fetch("/api/lobby/new?" + qs);
+      const d = await res.json();
+      S.solo = false;
+      S.lobbyKey = priv ? key : "";
+      connect(d.code, false);
+    } catch (e) {
+      err.textContent = "could not open a lobby";
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  /* ---------- spectating ---------- */
+  function spectate(code) {
+    if (!code) return;
+    S.solo = false;
+    S.spectating = true;
+    connect(code, false, { spectate: true });
   }
 
   /* ---------- challenges ---------- */
@@ -2508,6 +3099,7 @@
       if (btn) btn.textContent = "waiting…";
       // the challenger waits in the lobby they just opened
       S.solo = false;
+      S.lobbyKey = "";
       connect(d.code, true);
     } catch (err) {
       if (btn) {
@@ -2547,33 +3139,49 @@
     } else {
       const tag = document.createElement("span");
       tag.className = "muted";
-      tag.textContent = c.status;
-      act.appendChild(tag);
+      tag.textContent = c.status === "accepted" ? "in the lobby" : "waiting";
+      const drop = document.createElement("button");
+      drop.className = "ghost";
+      drop.type = "button";
+      drop.textContent = "Cancel";
+      drop.onclick = () => cancelChallenge(c);
+      act.append(tag, drop);
     }
     return row;
   }
 
   async function answerChallenge(c, action) {
+    dismissToast();
     try {
       const res = await fetch("/api/challenges/" + c.id + "/" + action, {
         method: "POST",
         credentials: "same-origin",
       });
       const d = await res.json();
-      hideChallengeToast();
+      if (!res.ok) {
+        if (action === "accept") alertLine("that invitation is no longer open");
+        loadChallenges();
+        return;
+      }
       if (action === "accept") {
-        if (!res.ok) {
-          if (d.error === "lobby_gone") alertLine("that lobby has already closed");
-          return;
-        }
         S.solo = false;
         connect(d.lobby, false);
-      } else {
-        loadChallenges();
       }
+    } catch (err) {
+      /* the socket resends the list on reconnect */
+    }
+  }
+
+  async function cancelChallenge(c) {
+    try {
+      await fetch("/api/challenges/" + c.id + "/cancel", {
+        method: "POST",
+        credentials: "same-origin",
+      });
     } catch (err) {
       /* ignore */
     }
+    loadChallenges();
   }
 
   function alertLine(text) {
@@ -2584,8 +3192,7 @@
     if (!S.me) return;
     try {
       const res = await fetch("/api/challenges", { credentials: "same-origin" });
-      const d = await res.json();
-      paintChallenges(d);
+      paintChallenges(await res.json());
     } catch (err) {
       /* ignore */
     }
@@ -2594,6 +3201,9 @@
   function paintChallenges(d) {
     const incoming = d.incoming || [];
     const outgoing = d.outgoing || [];
+    SOCIAL.incoming = incoming;
+    SOCIAL.outgoing = outgoing;
+
     const panel = el2("chPanel");
     const list = el2("chList");
     if (panel && list) {
@@ -2601,15 +3211,36 @@
       for (const c of incoming) list.appendChild(challengeRow(c, true));
       for (const c of outgoing) list.appendChild(challengeRow(c, false));
       panel.classList.toggle("hidden", incoming.length + outgoing.length === 0);
+      const count = el2("chCount");
+      if (count) {
+        count.textContent = incoming.length
+          ? incoming.length + " waiting on you"
+          : outgoing.length
+          ? "waiting on them"
+          : "";
+      }
     }
 
+    // The badge counts only what you can act on. It used to print a bare "0"
+    // whenever the list emptied, because the text was written before the
+    // element was hidden.
     const badge = el2("chBadge");
     if (badge) {
-      badge.textContent = incoming.length;
-      badge.classList.toggle("hidden", incoming.length === 0);
+      const n = incoming.length;
+      badge.textContent = n > 9 ? "9+" : String(n);
+      badge.classList.toggle("hidden", n === 0);
+      badge.title = n ? n + " invitation(s) waiting" : "";
     }
 
-    // pop a toast for anything we have not shown yet
+    // Forget toasts for invitations that are gone, so a re-invite pops again.
+    const live = new Set(incoming.map((c) => c.id));
+    for (const id of [...SOCIAL.shownChallenges]) {
+      if (!live.has(id)) SOCIAL.shownChallenges.delete(id);
+    }
+    const toast = el2("chToast");
+    if (toast && toast.dataset.id && !live.has(Number(toast.dataset.id))) {
+      dismissToast();
+    }
     for (const c of incoming) {
       if (SOCIAL.shownChallenges.has(c.id)) continue;
       SOCIAL.shownChallenges.add(c.id);
@@ -2621,23 +3252,175 @@
   function showChallengeToast(c) {
     const toast = el2("chToast");
     if (!toast) return;
+    clearTimeout(SOCIAL.toastTimer);
+    toast.dataset.id = c.id;
     paintAvatar(el2("chToastAvatar"), c.other);
+    const when = c.duration ? c.duration + "s" : "one snippet";
     el2("chToastText").textContent =
       c.other.name + " (" + c.other.rating + ") challenged you";
+    const sub = el2("chToastSub");
+    if (sub) sub.textContent = (c.language || "python") + " \u00b7 " + when;
     el2("chToastAccept").onclick = () => answerChallenge(c, "accept");
     el2("chToastDecline").onclick = () => answerChallenge(c, "decline");
     toast.classList.remove("hidden");
+    ding();
+    // The invitation expires server-side; drop the card well before that, so a
+    // stale one is never left sitting there to be clicked.
+    SOCIAL.toastTimer = setTimeout(dismissToast, 45000);
   }
 
-  function hideChallengeToast() {
+  function dismissToast() {
     const toast = el2("chToast");
-    if (toast) toast.classList.add("hidden");
+    if (!toast) return;
+    clearTimeout(SOCIAL.toastTimer);
+    toast.dataset.id = "";
+    toast.classList.add("hidden");
   }
 
+  /* A short blip on an invitation. Synthesised rather than loaded, and silent
+     until the page has been interacted with, which is what browsers require. */
+  function ding() {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = new Ctx();
+      if (ctx.state !== "running") {
+        ctx.close();
+        return;
+      }
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
+      osc.frequency.setValueAtTime(1180, ctx.currentTime + 0.08);
+      gain.gain.setValueAtTime(0.06, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.25);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.26);
+      setTimeout(() => ctx.close(), 400);
+    } catch (err) {
+      /* audio is a nicety, never a requirement */
+    }
+  }
+
+  /* ---------- notification socket ----------
+     One socket per tab, held open for as long as the account is known. It
+     carries invitations, presence and lobby-list changes, so none of those
+     screens poll any more: an invitation lands the moment it is sent, and the
+     socket closing is what marks the player offline. */
+  function userSocket() {
+    if (!S.me) return;
+    if (
+      SOCIAL.ws &&
+      (SOCIAL.ws.readyState === WebSocket.OPEN ||
+        SOCIAL.ws.readyState === WebSocket.CONNECTING)
+    ) {
+      return;
+    }
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    let ws;
+    try {
+      ws = new WebSocket(proto + "//" + location.host + "/ws/user");
+    } catch (err) {
+      scheduleUserSocket();
+      return;
+    }
+    SOCIAL.ws = ws;
+    ws.onopen = () => {
+      SOCIAL.wsRetry = 0;
+      setLive(true);
+    };
+    ws.onmessage = (ev) => {
+      let m;
+      try {
+        m = JSON.parse(ev.data);
+      } catch (err) {
+        return;
+      }
+      handleUser(m);
+    };
+    ws.onclose = () => {
+      SOCIAL.ws = null;
+      setLive(false);
+      scheduleUserSocket();
+    };
+    ws.onerror = () => {};
+  }
+
+  function scheduleUserSocket() {
+    if (!S.me) return;
+    clearTimeout(SOCIAL.wsTimer);
+    // back off to 15s, so a server restart does not become a retry storm
+    SOCIAL.wsRetry = Math.min(15000, (SOCIAL.wsRetry || 500) * 2);
+    SOCIAL.wsTimer = setTimeout(userSocket, SOCIAL.wsRetry);
+  }
+
+  function setLive(on) {
+    for (const node of document.querySelectorAll(".live")) {
+      node.classList.toggle("off", !on);
+      node.textContent = on ? "live" : "reconnecting";
+    }
+  }
+
+  function handleUser(m) {
+    switch (m.t) {
+      case "challenges":
+        paintChallenges(m);
+        break;
+      case "challenge_accepted":
+        // the other player said yes: walk into the lobby that was opened
+        dismissToast();
+        if (S.room !== m.code) {
+          S.solo = false;
+          connect(m.code, false);
+        }
+        flashNote(m.by + " accepted");
+        break;
+      case "challenge_declined":
+        flashNote(m.by + " declined your challenge");
+        break;
+      case "challenge_cancelled":
+        dismissToast();
+        break;
+      case "presence":
+        if (isOpen("screen-players")) loadPlayers();
+        break;
+      case "lobbies":
+        if (isOpen("screen-lobbies")) loadLobbies();
+        if (isOpen("screen-players")) loadPlayers();
+        break;
+      case "ping":
+        if (SOCIAL.ws && SOCIAL.ws.readyState === WebSocket.OPEN) {
+          SOCIAL.ws.send(JSON.stringify({ t: "pong" }));
+        }
+        break;
+    }
+  }
+
+  function isOpen(id) {
+    const node = el2(id);
+    return !!node && !node.classList.contains("hidden");
+  }
+
+  /* A one-line notice that does not warrant a dialog. */
+  function flashNote(text) {
+    const node = el2("flashNote");
+    if (!node) return;
+    node.textContent = text;
+    node.classList.remove("hidden");
+    clearTimeout(SOCIAL.noteTimer);
+    SOCIAL.noteTimer = setTimeout(() => node.classList.add("hidden"), 4500);
+  }
+
+  /* The socket is what keeps the account online. This stays as a fallback for
+     a browser or proxy that will not hold a websocket open. */
   function startHeartbeat() {
+    userSocket();
     clearInterval(SOCIAL.beatTimer);
-    const beat = async () => {
+    SOCIAL.beatTimer = setInterval(async () => {
       if (!S.me) return;
+      if (SOCIAL.ws && SOCIAL.ws.readyState === WebSocket.OPEN) return;
       try {
         const res = await fetch("/api/heartbeat", {
           method: "POST",
@@ -2648,9 +3431,7 @@
       } catch (err) {
         /* ignore */
       }
-    };
-    beat();
-    SOCIAL.beatTimer = setInterval(beat, 20000);
+    }, 20000);
   }
 
   /* ---------- reports ---------- */
@@ -2852,6 +3633,24 @@
   /* ---------- wiring ---------- */
   on(el2("feedBtn"), "click", showFeed);
   on(el2("playersBtn"), "click", showPlayers);
+  on(el2("lobbiesBtn"), "click", showLobbies);
+  on(el2("backBtn"), "click", backToGame);
+  on(el.resign, "click", giveUp);
+  on(el2("newLobbyGo"), "click", createListedLobby);
+  on(el2("lobbyRefresh"), "click", loadLobbies);
+  on(el2("newPrivate"), "change", () => {
+    const box = el2("newKeyField");
+    if (box) box.classList.toggle("hidden", !el2("newPrivate").checked);
+  });
+  on(el2("keyCancel"), "click", closeKeyPrompt);
+  on(el2("keyGo"), "click", submitKey);
+  on(el2("keyInput"), "keydown", (e) => {
+    if (e.key === "Enter") submitKey();
+  });
+  on(el2("chToastOpen"), "click", () => {
+    dismissToast();
+    showPlayers();
+  });
   on(el2("snippetsBtn"), "click", showSnippets);
   on(el2("feedMore"), "click", () => loadFeed(true));
   on(el2("snipSave"), "click", saveSnippet);
@@ -2864,6 +3663,13 @@
     on(b, "click", backToGame);
   }
 
+  loadDisplay();
+  paintBackButton();
+  let resizeTimer = 0;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(remeasure, 120);
+  });
   Promise.all([initMeta(), loadMe(), loadBots()]).then(() => {
     const code = new URLSearchParams(location.search).get("l");
     if (code) joinLobby(code);

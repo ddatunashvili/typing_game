@@ -72,6 +72,23 @@
 <link rel="dns-prefetch" href="https://cdnjs.cloudflare.com" />
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" />
 <link rel="stylesheet" href="/static/style.css" />
+
+<!-- Theme, applied before first paint so a light-theme user never sees a dark
+     flash. app.js keeps this attribute and localStorage in step afterwards. -->
+<script>
+(function () {
+  try {
+    var t = localStorage.getItem("cr_theme");
+    if (t) document.documentElement.setAttribute("data-theme", t);
+    var d = localStorage.getItem("cr_display");
+    if (d) {
+      d = JSON.parse(d);
+      if (d.lineNumbers === false) document.documentElement.classList.add("no-lines");
+      if (d.indentGuides === false) document.documentElement.classList.add("no-guides");
+    }
+  } catch (e) {}
+})();
+</script>
 </head>
 <body>
 
@@ -88,6 +105,8 @@
     <span class="brand-text">Code<em>Race</em></span>
   </a>
   <div class="top-right">
+    <button id="backBtn" class="primary hidden" type="button">back to the game</button>
+    <button id="lobbiesBtn" class="ghost">Lobbies</button>
     <button id="feedBtn" class="ghost">Feed</button>
     <button id="playersBtn" class="ghost">Players<span id="chBadge" class="ch-badge hidden">0</span></button>
     <button id="ranksBtn" class="ghost">Rankings</button>
@@ -203,7 +222,6 @@
   <div class="home-wrap">
     <div class="ranks-head">
       <h1>Feed</h1>
-      <button class="ghost js-back" type="button">back to game</button>
     </div>
     <p class="sub">
       Every finished race is posted here. Like it, argue in the comments, or report it.
@@ -222,49 +240,120 @@
 
 <!-- PLAYERS -->
 <main id="screen-players" class="screen hidden">
-  <div class="home-wrap">
-    <div class="ranks-head">
-      <h1>Find players</h1>
-      <button class="ghost js-back" type="button">back to game</button>
-    </div>
-    <p class="sub">
-      Anyone active in the last five minutes. Challenge them and they get an
-      invitation the moment they look. <span id="playersLive" class="live">live</span>
-    </p>
-
-    <section class="panel hidden" id="chPanel">
-      <h2>your invitations</h2>
-      <div id="chList" class="ch-list"></div>
-    </section>
-
-    <section class="panel">
-      <h2>
-        challenge settings
-        <span class="muted">used for every invitation you send</span>
-      </h2>
-      <div class="ch-settings">
-        <label class="field">
-          <span>language</span>
-          <select id="chLang" class="lang-select"></select>
-        </label>
-        <label class="field">
-          <span>race time</span>
-          <select id="chDuration" class="lang-select">
-            <option value="0">One snippet</option>
-            <option value="30">30s</option>
-            <option value="60">1 min</option>
-            <option value="120">2 min</option>
-            <option value="300">5 min</option>
-          </select>
-        </label>
+  <div class="page">
+    <header class="page-head">
+      <div>
+        <h1>Find players</h1>
+        <p class="sub">
+          Everyone here right now. Send an invitation and it lands on their
+          screen the moment you click. <span id="playersLive" class="live">live</span>
+        </p>
       </div>
-    </section>
+    </header>
 
-    <section class="panel">
-      <h2>online now <span id="playersCount" class="muted"></span></h2>
-      <div id="playersList" class="ranks"></div>
-      <p id="playersEmpty" class="muted hidden">Nobody else about right now.</p>
-    </section>
+    <div class="page-body">
+      <section class="panel span-2">
+        <h2>online now <span id="playersCount" class="muted"></span></h2>
+        <div id="playersList" class="ranks"></div>
+        <p id="playersEmpty" class="muted hidden">Nobody else about right now.</p>
+      </section>
+
+      <aside class="page-side">
+        <section class="panel hidden" id="chPanel">
+          <h2>your invitations <span id="chCount" class="muted"></span></h2>
+          <div id="chList" class="ch-list"></div>
+        </section>
+
+        <section class="panel">
+          <h2>
+            challenge settings
+            <span class="muted">used for every invitation you send</span>
+          </h2>
+          <div class="ch-settings">
+            <label class="field">
+              <span>language</span>
+              <select id="chLang" class="lang-select"></select>
+            </label>
+            <label class="field">
+              <span>race time</span>
+              <select id="chDuration" class="lang-select">
+                <option value="0">One snippet</option>
+                <option value="30">30s</option>
+                <option value="60">1 min</option>
+                <option value="120">2 min</option>
+                <option value="300">5 min</option>
+              </select>
+            </label>
+          </div>
+        </section>
+      </aside>
+    </div>
+  </div>
+</main>
+
+<!-- LOBBIES -->
+<main id="screen-lobbies" class="screen hidden">
+  <div class="page">
+    <header class="page-head">
+      <div>
+        <h1>Lobbies</h1>
+        <p class="sub">
+          Open rooms anyone can walk into, and private ones that want a key.
+          <span id="lobbiesLive" class="live">live</span>
+        </p>
+      </div>
+    </header>
+
+    <div class="page-body">
+      <section class="panel span-2">
+        <h2>
+          open now <span id="lobbyCount" class="muted"></span>
+          <button id="lobbyRefresh" class="ghost small" type="button">refresh</button>
+        </h2>
+        <div id="lobbyList" class="lobby-list"></div>
+        <p id="lobbyEmpty" class="muted hidden">
+          No lobbies up yet. Open one and it shows here for everyone.
+        </p>
+      </section>
+
+      <aside class="page-side">
+        <section class="panel">
+          <h2>open a lobby</h2>
+          <label class="field">
+            <span>name <em class="muted">optional</em></span>
+            <input id="newTitle" maxlength="40" placeholder="Friday night race" />
+          </label>
+          <label class="field">
+            <span>language</span>
+            <select id="newLang" class="lang-select"></select>
+          </label>
+          <label class="field">
+            <span>race time</span>
+            <select id="newDuration" class="lang-select">
+              <option value="0">One snippet</option>
+              <option value="30">30s</option>
+              <option value="60">1 min</option>
+              <option value="120">2 min</option>
+              <option value="300">5 min</option>
+            </select>
+          </label>
+          <label class="tog">
+            <input id="newPrivate" type="checkbox" />
+            <span>private</span>
+          </label>
+          <label class="field hidden" id="newKeyField">
+            <span>key <em class="muted">others need this to get in</em></span>
+            <input id="newKey" maxlength="24" placeholder="a word you share" />
+          </label>
+          <p id="newLobbyErr" class="err"></p>
+          <button id="newLobbyGo" class="accent" type="button">Open it</button>
+          <p class="muted">
+            A private lobby with a key is listed as locked. Without one it is
+            not listed at all, and only the invite link gets anybody in.
+          </p>
+        </section>
+      </aside>
+    </div>
   </div>
 </main>
 
@@ -273,7 +362,6 @@
   <div class="home-wrap">
     <div class="ranks-head">
       <h1 id="userTitle">Profile</h1>
-      <button class="ghost js-back" type="button">back to game</button>
     </div>
 
     <section class="panel">
@@ -307,7 +395,6 @@
   <div class="home-wrap">
     <div class="ranks-head">
       <h1>Your snippets</h1>
-      <button class="ghost js-back" type="button">back to game</button>
     </div>
     <p class="sub">
       Add code of your own. Public snippets join everyone's races; private ones
@@ -407,9 +494,33 @@
 <!-- CHALLENGE TOAST -->
 <div id="chToast" class="ch-toast hidden">
   <span id="chToastAvatar" class="avatar sm"></span>
-  <span id="chToastText" class="ch-toast-text"></span>
+  <span class="ch-toast-body">
+    <span id="chToastText" class="ch-toast-text"></span>
+    <span id="chToastSub" class="muted"></span>
+  </span>
   <button id="chToastAccept" class="accent" type="button">Accept</button>
   <button id="chToastDecline" class="ghost" type="button">Later</button>
+  <button id="chToastOpen" class="ghost" type="button" title="see all invitations">&hellip;</button>
+</div>
+
+<!-- one-line notices: a decline, an acceptance -->
+<div id="flashNote" class="flash-note hidden"></div>
+
+<!-- PRIVATE LOBBY KEY -->
+<div id="keyModal" class="modal hidden">
+  <div class="modal-card">
+    <h3 id="keyTitle">This lobby is private</h3>
+    <p class="muted">Ask whoever opened it for the key.</p>
+    <label class="field">
+      <span>key</span>
+      <input id="keyInput" maxlength="24" autocomplete="off" />
+    </label>
+    <p id="keyErr" class="err"></p>
+    <div class="modal-ctl">
+      <button id="keyCancel" class="ghost" type="button">cancel</button>
+      <button id="keyGo" class="accent" type="button">Go in</button>
+    </div>
+  </div>
 </div>
 
 <!-- LOBBY / RACE -->
@@ -437,9 +548,11 @@
       </div>
       <div class="room-ctl">
         <span id="snipMeta" class="snip-meta"></span>
+        <span id="watchTag" class="badge watching hidden">spectating</span>
         <span id="stateBadge" class="badge">waiting</span>
         <button id="readyBtn" class="primary">Ready</button>
         <button id="startBtn" class="accent hidden">Start race</button>
+        <button id="resignBtn" class="danger hidden" type="button">Give up</button>
         <button id="againBtn" class="accent hidden">Race again</button>
         <button id="newSnipBtn" class="ghost hidden">Another snippet</button>
       </div>
@@ -462,6 +575,7 @@
     </div>
 
     <div id="racers" class="racers"></div>
+    <div id="watchers" class="watchers hidden"></div>
 
     <div class="stage">
       <div id="countdown" class="countdown hidden"><span id="countNum">5</span></div>
@@ -473,6 +587,8 @@
         <div class="hud-item" id="hudSnipsBox"><b id="hudSnips">0</b><span>done</span></div>
       </div>
       <div id="codeBox" class="code-box">
+        <div id="gutter" class="gutter" aria-hidden="true"></div>
+        <div id="lineGlow" class="line-glow" aria-hidden="true"></div>
         <pre id="codeArea" class="code-area"></pre>
         <div id="ghosts" class="ghosts"></div>
       </div>
@@ -583,6 +699,32 @@
       <span id="pfPreview" class="avatar big"></span>
       <span class="muted">current avatar</span>
       <button id="pfRemove" class="ghost hidden" type="button">remove image</button>
+    </div>
+
+    <div class="field">
+      <span>appearance</span>
+      <div id="themeGrid" class="theme-grid"></div>
+      <span class="muted">
+        Saved on this device, and on your account so it follows you to another one.
+      </span>
+    </div>
+
+    <div class="field">
+      <span>code area</span>
+      <div class="toggles">
+        <label class="tog">
+          <input id="optLineNumbers" type="checkbox" checked />
+          <span>line numbers</span>
+        </label>
+        <label class="tog">
+          <input id="optIndentGuides" type="checkbox" checked />
+          <span>indent guides</span>
+        </label>
+        <label class="tog">
+          <input id="optCaretScroll" type="checkbox" checked />
+          <span>keep the caret centred</span>
+        </label>
+      </div>
     </div>
 
     <p id="pfErr" class="err"></p>

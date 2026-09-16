@@ -11,6 +11,8 @@ comments and submissions are rate limited per account.
 """
 from typing import Any, Dict, List, Optional
 
+import time
+
 import db
 import rating
 
@@ -554,48 +556,121 @@ def _shape_challenge(row: dict) -> dict:
     }
 
 
-def challenges_for(user_id: int) -> dict:
-    """Live challenges in both directions. Stale invitations expire first."""
+# Sweeping expired invitations is two writes against a remote database, and
+# it was running on every single read of the invitation list - which put about
+# 350ms in front of every challenge. Nothing depends on it being instant: an
+# invitation is stale for five minutes before it qualifies, so once a minute is
+# ample.
+_SWEPT_AT = 0.0
+SWEEP_EVERY = 60.0
+
+
+def expire_stale(force: bool = False) -> None:
+    """Age out invitations nobody is going to act on.
+
+    Accepted rows expire too: once both players are in the lobby the row has
+    done its job, and leaving it "accepted" forever kept a dead entry pinned to
+    the top of the sender's list.
+    """
+    global _SWEPT_AT
+    now = time.monotonic()
+    if not force and now - _SWEPT_AT < SWEEP_EVERY:
+        return
+    _SWEPT_AT = now
     db.execute(
         "UPDATE cr_challenges SET status = 'expired' "
-        "WHERE status = 'pending' AND created_at < NOW() - INTERVAL 10 MINUTE"
+        "WHERE status = 'pending' AND created_at < NOW() - INTERVAL 5 MINUTE"
     )
-    incoming = db.query(
-        "SELECT c.id, c.lobby, c.language, c.levels, c.topics, c.duration, "
-        "c.status, c.created_at, u.id AS other_id, u.name, u.avatar_mime, "
-        "u.avatar_version, u.rating FROM cr_challenges AS c "
-        "JOIN cr_users AS u ON u.id = c.from_id "
-        "WHERE c.to_id = %s AND c.status = 'pending' ORDER BY c.id DESC LIMIT 10",
-        (user_id,),
+    db.execute(
+        "UPDATE cr_challenges SET status = 'done' "
+        "WHERE status = 'accepted' AND created_at < NOW() - INTERVAL 5 MINUTE"
     )
-    outgoing = db.query(
-        "SELECT c.id, c.lobby, c.language, c.levels, c.topics, c.duration, "
-        "c.status, c.created_at, u.id AS other_id, u.name, u.avatar_mime, "
-        "u.avatar_version, u.rating FROM cr_challenges AS c "
-        "JOIN cr_users AS u ON u.id = c.to_id "
-        "WHERE c.from_id = %s AND c.status IN ('pending', 'accepted') "
-        "ORDER BY c.id DESC LIMIT 10",
-        (user_id,),
+
+
+def cancel_open(from_id: int, to_id: int) -> None:
+    """Withdraw this sender's earlier invitations to the same player.
+
+    Without this every click of Challenge stacked another row, so the target saw
+    one toast per click and the badge counted invitations that pointed at
+    lobbies the sender had already left.
+    """
+    db.execute(
+        "UPDATE cr_challenges SET status = 'cancelled' "
+        "WHERE from_id = %s AND to_id = %s AND status = 'pending'",
+        (from_id, to_id),
+    )
+
+
+def get_challenge(challenge_id: int) -> Optional[dict]:
+    """Full row including the lobby settings, for rebuilding a lost lobby."""
+    return db.one(
+        "SELECT id, from_id, to_id, lobby, language, levels, topics, duration, "
+        "status FROM cr_challenges WHERE id = %s",
+        (challenge_id,),
+    )
+
+
+def set_lobby(challenge_id: int, lobby: str) -> None:
+    db.execute(
+        "UPDATE cr_challenges SET lobby = %s WHERE id = %s",
+        (lobby[:8], challenge_id),
+    )
+
+
+def challenges_for(user_id: int) -> dict:
+    """Live challenges in both directions. Stale invitations expire first."""
+    expire_stale()
+    # Both directions in one round trip: two separate queries doubled the
+    # latency of the most frequently hit call in the app.
+    rows = db.query(
+        "(SELECT 'in' AS dir, c.id, c.lobby, c.language, c.levels, c.topics, "
+        " c.duration, c.status, c.created_at, u.id AS other_id, u.name, "
+        " u.avatar_mime, u.avatar_version, u.rating "
+        " FROM cr_challenges AS c JOIN cr_users AS u ON u.id = c.from_id "
+        " WHERE c.to_id = %s AND c.status = 'pending' "
+        " ORDER BY c.id DESC LIMIT 10) "
+        "UNION ALL "
+        "(SELECT 'out' AS dir, c.id, c.lobby, c.language, c.levels, c.topics, "
+        " c.duration, c.status, c.created_at, u.id AS other_id, u.name, "
+        " u.avatar_mime, u.avatar_version, u.rating "
+        " FROM cr_challenges AS c JOIN cr_users AS u ON u.id = c.to_id "
+        " WHERE c.from_id = %s AND c.status IN ('pending', 'accepted') "
+        " ORDER BY c.id DESC LIMIT 10)",
+        (user_id, user_id),
     )
     return {
-        "incoming": [_shape_challenge(r) for r in incoming],
-        "outgoing": [_shape_challenge(r) for r in outgoing],
+        "incoming": [_shape_challenge(r) for r in rows if r["dir"] == "in"],
+        "outgoing": [_shape_challenge(r) for r in rows if r["dir"] == "out"],
     }
 
 
+def name_of(user_id: int) -> Optional[dict]:
+    """Just enough of a player to address an invitation to them."""
+    return db.one("SELECT id, name FROM cr_users WHERE id = %s", (user_id,))
+
+
 def set_challenge_status(challenge_id: int, user_id: int, status: str) -> Optional[dict]:
-    """Accept or decline an invitation addressed to this player."""
-    row = db.one(
-        "SELECT id, from_id, to_id, lobby FROM cr_challenges WHERE id = %s",
-        (challenge_id,),
-    )
-    if row is None or int(row["to_id"]) != user_id:
+    """Move an invitation on.
+
+    The recipient accepts or declines; the sender cancels. Anyone else, or an
+    invitation that has already been answered, gets None so the caller can
+    report it rather than silently rewriting someone else's row.
+    """
+    row = get_challenge(challenge_id)
+    if row is None:
+        return None
+    sender = status == "cancelled"
+    owner = int(row["from_id"]) if sender else int(row["to_id"])
+    if owner != user_id:
+        return None
+    if row.get("status") not in ("pending", "accepted"):
         return None
     db.execute(
         "UPDATE cr_challenges SET status = %s WHERE id = %s",
         (status[:10], challenge_id),
     )
-    return {"id": int(row["id"]), "lobby": row["lobby"], "status": status}
+    row["status"] = status
+    return row
 
 
 def pending_challenge_count(user_id: int) -> int:

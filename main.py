@@ -198,6 +198,7 @@ class Player:
         self.wpm = 0.0
         self.acc = 100.0
         self.finished = False
+        self.gave_up = False
         self.place: Optional[int] = None
         self.time: Optional[float] = None
 
@@ -213,6 +214,7 @@ class Player:
         self.wpm = 0.0
         self.acc = 100.0
         self.finished = False
+        self.gave_up = False
         self.place = None
         self.time = None
 
@@ -237,6 +239,7 @@ class Player:
             "wpm": round(self.wpm, 1),
             "acc": round(self.acc, 1),
             "finished": self.finished,
+            "gave_up": self.gave_up,
             "place": self.place,
             "time": round(self.time, 2) if self.time is not None else None,
         }
@@ -250,8 +253,18 @@ class Lobby:
         levels_filter: Optional[List[str]] = None,
         topics_filter: Optional[List[str]] = None,
         duration: Optional[int] = None,
+        private: bool = False,
+        key: str = "",
+        title: str = "",
     ):
         self.code = code
+        # A private lobby is hidden from the browser unless it has a key, in
+        # which case it is listed as locked and the key is the way in. The code
+        # on its own is never enough for a keyed lobby.
+        self.private = bool(private)
+        self.key = str(key or "")[:24]
+        self.title = str(title or "")[:40]
+        self.watchers: Dict[str, Player] = {}
         self.language = language if language in LANGUAGE_IDS else "python"
         self.levels: List[str] = clean_ids(levels_filter, LEVEL_IDS)
         self.topics: List[str] = clean_ids(topics_filter, library.topic_ids())
@@ -310,6 +323,34 @@ class Lobby:
     def humans(self) -> List[Player]:
         return [p for p in self.roster() if not p.bot]
 
+    def watcher_list(self) -> List[dict]:
+        return [
+            {"id": w.id, "name": w.name, "uid": w.uid, "avatar": w.avatar}
+            for w in self.watchers.values()
+        ]
+
+    def listing(self) -> dict:
+        """One row for the lobby browser. Never leaks the key itself."""
+        racers = self.roster()
+        host = self.players.get(self.host or "")
+        return {
+            "code": self.code,
+            "title": self.title,
+            "language": self.language,
+            "levels": self.levels,
+            "topics": self.topics,
+            "duration": self.duration,
+            "state": self.state,
+            "private": self.private,
+            "locked": bool(self.key),
+            "host": host.name if host else "",
+            "players": len(racers),
+            "humans": len([p for p in racers if not p.bot]),
+            "bots": len([p for p in racers if p.bot]),
+            "watchers": len(self.watchers),
+            "names": [p.name for p in racers][:8],
+        }
+
     def roster(self) -> List[Player]:
         return [self.players[pid] for pid in self.order if pid in self.players]
 
@@ -354,10 +395,15 @@ class Lobby:
                 for s in self.playlist
             ],
             "start_ts": self.start_ts,
+            "private": self.private,
+            "locked": bool(self.key),
+            "title": self.title,
             "players": [p.public() for p in self.roster()],
+            "watchers": self.watcher_list(),
         }
 
     async def broadcast(self, message: dict, skip: Optional[str] = None) -> None:
+        """Send to every racer and every spectator watching this lobby."""
         payload = json.dumps(message)
         dead = []
         for pid, player in list(self.players.items()):
@@ -369,6 +415,16 @@ class Lobby:
                 dead.append(pid)
         for pid in dead:
             self.players.pop(pid, None)
+        gone = []
+        for wid, watcher in list(self.watchers.items()):
+            if wid == skip or watcher.ws is None:
+                continue
+            try:
+                await watcher.ws.send_text(payload)
+            except Exception:
+                gone.append(wid)
+        for wid in gone:
+            self.watchers.pop(wid, None)
 
     async def push_state(self) -> None:
         await self.broadcast(self.snapshot())
@@ -401,6 +457,7 @@ class Lobby:
         self.finish_count = 0
         self.state = "countdown"
         await self.push_state()
+        asyncio.create_task(announce_lobbies())
         self.cancel_task()
         self.task = asyncio.create_task(self._countdown())
 
@@ -528,11 +585,12 @@ class Lobby:
     async def finish_timed(self) -> None:
         """Rank by characters typed, then accuracy, and close the race."""
         racers = [p for p in self.roster()]
-        ranked = sorted(racers, key=lambda p: (-p.chars, -p.acc))
+        # Anyone who resigned sorts below everyone still typing, however far
+        # they had got before they quit.
+        ranked = sorted(racers, key=lambda p: (p.gave_up, -p.chars, -p.acc))
         for i, player in enumerate(ranked, start=1):
             player.finished = True
-            if player.place is None:
-                player.place = i
+            player.place = i
             if player.time is None:
                 player.time = float(self.duration)
         self.state = "finished"
@@ -540,6 +598,29 @@ class Lobby:
         await self.broadcast({"t": "time_up"})
         await self.score_race()
         await self.push_state()
+
+    async def resign(self, player: Player) -> None:
+        """A racer gives up: they stop, but the race carries on without them.
+
+        No place is handed out here. Whoever is still typing keeps claiming the
+        next real finishing position, and the quitters are slotted in behind
+        them once the race closes.
+        """
+        if self.state != "racing" or player.finished:
+            return
+        player.gave_up = True
+        player.finished = True
+        player.time = max(0.0, time.time() - self.start_ts)
+        await self.system("%s gave up" % player.name)
+        await self.push_state()
+        await self.maybe_finish()
+
+    def seat_quitters(self) -> None:
+        """Give every resigner a place, behind the racers who finished."""
+        quitters = [p for p in self.roster() if p.place is None]
+        quitters.sort(key=lambda p: -p.progress)
+        for i, player in enumerate(quitters, start=self.finish_count + 1):
+            player.place = i
 
     async def reset_to_lobby(self) -> None:
         self.cancel_task()
@@ -568,8 +649,9 @@ class Lobby:
                 continue
             span = max(1, player.chars) if self.duration > 0 else length
             errors = max(0, int(round(span * (100.0 - player.acc) / 100.0)))
+            completed = bool(player.finished) and not player.gave_up
             player.stars = rating.stars(
-                player.acc, errors, span, bool(player.finished), player.place == 1
+                player.acc, errors, span, completed, player.place == 1
             )
 
         # Elo: guests and bots are opposition but keep no rating of their own
@@ -650,11 +732,87 @@ class Lobby:
             await self.finish_timed()
             return
         self.state = "finished"
+        self.seat_quitters()
         await self.score_race()
         await self.push_state()
+        asyncio.create_task(announce_lobbies())
 
 
 lobbies: Dict[str, Lobby] = {}
+
+
+# ---------- live notification hub ----------
+# One socket per open tab, keyed by account. Everything that used to arrive on
+# the 20-second heartbeat poll (invitations, the online list, a decline) is
+# pushed down this instead, so a challenge lands the moment it is sent.
+hub: Dict[int, List[WebSocket]] = {}
+
+
+def hub_add(uid: int, ws: WebSocket) -> None:
+    hub.setdefault(uid, []).append(ws)
+
+
+def hub_drop(uid: int, ws: WebSocket) -> None:
+    sockets = hub.get(uid)
+    if not sockets:
+        return
+    if ws in sockets:
+        sockets.remove(ws)
+    if not sockets:
+        hub.pop(uid, None)
+
+
+def hub_online() -> set:
+    return set(hub.keys())
+
+
+def mark_seen(uid: Optional[int], ip: str) -> None:
+    """Record activity without making the caller wait for the database."""
+    if not uid or not db.enabled():
+        return
+    asyncio.create_task(run_in_threadpool(db.seen, int(uid), ip))
+
+
+async def notify(uid: Optional[int], payload: dict) -> None:
+    """Send to every tab this account has open. Dead sockets are dropped."""
+    if not uid:
+        return
+    sockets = list(hub.get(int(uid)) or ())
+    if not sockets:
+        return
+    text = json.dumps(payload)
+    for ws in sockets:
+        try:
+            await ws.send_text(text)
+        except Exception:
+            hub_drop(int(uid), ws)
+
+
+async def notify_all(payload: dict, skip: Optional[int] = None) -> None:
+    for uid in list(hub.keys()):
+        if skip is not None and uid == skip:
+            continue
+        await notify(uid, payload)
+
+
+async def push_challenges(uid: Optional[int]) -> None:
+    """Re-send one account's invitation list. Cheap enough to call on any change."""
+    if not uid or not db.enabled() or int(uid) not in hub:
+        return
+    data = await run_in_threadpool(social.challenges_for, int(uid))
+    await notify(int(uid), {"t": "challenges", **data})
+
+
+async def announce_presence() -> None:
+    """Tell every open tab the online list moved, so it refetches once."""
+    await notify_all({"t": "presence"})
+
+
+async def announce_lobbies() -> None:
+    """Nudge anyone sitting on the lobby browser to refetch the list."""
+    await notify_all({"t": "lobbies"})
+
+
 
 
 # ---------- catalog ----------
@@ -1072,21 +1230,35 @@ async def api_players(request: Request, limit: int = 40):
     viewer = await current_user(request)
     viewer_id = int(viewer["id"]) if viewer else None
     # whoever is sitting in a lobby right now counts as busy
-    racing = {p.uid for lobby in lobbies.values() for p in lobby.roster() if p.uid}
+    racing = {}
+    for lobby in lobbies.values():
+        for p in lobby.roster():
+            if p.uid:
+                racing[p.uid] = lobby
+    # An open notification socket is a better "online" signal than last_seen_at:
+    # it drops the instant the tab closes instead of five minutes later.
+    live = hub_online()
     for row in rows:
-        row["racing"] = row["id"] in racing
+        seat = racing.get(row["id"])
+        row["racing"] = seat is not None
+        # A spectate link only makes sense for a lobby anyone may walk into.
+        row["watch"] = seat.code if seat is not None and not seat.key else ""
+        row["state"] = seat.state if seat is not None else ""
         row["me"] = row["id"] == viewer_id
+        if row["id"] in live:
+            row["online"] = True
+            row["idle"] = 0
     return {"players": rows, "accounts": True}
 
 
 @app.post("/api/heartbeat")
 async def api_heartbeat(request: Request):
-    """Keeps the player on the online list, and carries back any invitations."""
+    """Fallback presence ping for a browser whose notification socket is down."""
     user = await current_user(request)
     if user is None:
         return {"online": False, "challenges": {"incoming": [], "outgoing": []}}
     uid = int(user["id"])
-    await run_in_threadpool(db.seen, uid, client_ip(request))
+    mark_seen(uid, client_ip(request))
     pending = await run_in_threadpool(social.challenges_for, uid)
     return {"online": True, "challenges": pending}
 
@@ -1097,6 +1269,15 @@ async def api_challenges(request: Request):
     if user is None:
         return {"incoming": [], "outgoing": []}
     return await run_in_threadpool(social.challenges_for, int(user["id"]))
+
+
+def open_lobby(code: str, lang: str, levels_ids, topics_ids, duration: int) -> Lobby:
+    """Create the lobby for an invitation, reusing one that is already up."""
+    lobby = lobbies.get(code)
+    if lobby is None:
+        lobby = Lobby(code, lang, list(levels_ids), list(topics_ids), duration)
+        lobbies[code] = lobby
+    return lobby
 
 
 @app.post("/api/challenge")
@@ -1118,17 +1299,23 @@ async def api_challenge(request: Request):
     if target <= 0 or target == uid:
         return JSONResponse({"error": "bad_target"}, status_code=400)
 
-    other = await run_in_threadpool(social.profile, target)
+    other = await run_in_threadpool(social.name_of, target)
     if other is None:
         return JSONResponse({"error": "no_such_player"}, status_code=404)
 
-    lang = str(body.get("lang", "python"))
+    lang = str(body.get("lang") or "python")
+    if lang not in LANGUAGE_IDS:
+        lang = "python"
     wanted_levels = parse_ids(str(body.get("levels", "")), LEVEL_IDS)
     wanted_topics = parse_ids(str(body.get("topics", "")), library.topic_ids())
     duration = clean_duration(body.get("duration", 0))
 
+    # One live invitation per pair: a second click replaces the first rather
+    # than stacking another toast on the other player.
+    await run_in_threadpool(social.cancel_open, uid, target)
+
     code = new_code()
-    lobbies[code] = Lobby(code, lang, wanted_levels, wanted_topics, duration)
+    open_lobby(code, lang, wanted_levels, wanted_topics, duration)
 
     challenge_id = await run_in_threadpool(
         social.add_challenge,
@@ -1140,10 +1327,15 @@ async def api_challenge(request: Request):
         ",".join(wanted_topics),
         duration,
     )
+    # Both sides repaint straight away: the target gets the toast, the sender
+    # gets the "waiting for them" row. Off the response path, so the challenger
+    # is in their lobby before either list has finished rebuilding.
+    asyncio.create_task(push_challenges(target))
+    asyncio.create_task(push_challenges(uid))
     return {
         "id": challenge_id,
         "code": code,
-        "to": {"id": target, "name": other["name"]},
+        "to": {"id": target, "name": other["name"], "online": target in hub_online()},
     }
 
 
@@ -1152,18 +1344,55 @@ async def api_challenge_action(challenge_id: int, action: str, request: Request)
     user = await current_user(request)
     if user is None:
         return JSONResponse({"error": "not_registered"}, status_code=401)
-    if action not in ("accept", "decline"):
+    if action not in ("accept", "decline", "cancel"):
         return JSONResponse({"error": "bad_action"}, status_code=400)
 
-    status = "accepted" if action == "accept" else "declined"
-    result = await run_in_threadpool(
+    status = {"accept": "accepted", "decline": "declined", "cancel": "cancelled"}[action]
+    row = await run_in_threadpool(
         social.set_challenge_status, challenge_id, int(user["id"]), status
     )
-    if result is None:
+    if row is None:
         return JSONResponse({"error": "not_found"}, status_code=404)
-    if status == "accepted" and result["lobby"] not in lobbies:
-        return JSONResponse({"error": "lobby_gone", "status": status}, status_code=410)
-    return result
+
+    sender = int(row["from_id"])
+    target = int(row["to_id"])
+    code = str(row["lobby"])
+
+    if status == "accepted":
+        # The sender's lobby is gone if their tab closed or reloaded between the
+        # invitation and the answer. Rebuild it from the invitation's own
+        # settings instead of failing with "that lobby has already closed".
+        if code not in lobbies:
+            code = new_code()
+            open_lobby(
+                code,
+                str(row.get("language") or "python"),
+                parse_ids(str(row.get("levels") or ""), LEVEL_IDS),
+                parse_ids(str(row.get("topics") or ""), library.topic_ids()),
+                clean_duration(row.get("duration") or 0),
+            )
+            await run_in_threadpool(social.set_lobby, challenge_id, code)
+        # the sender may be sitting on another screen: send them into the lobby
+        await notify(
+            sender,
+            {
+                "t": "challenge_accepted",
+                "id": int(row["id"]),
+                "code": code,
+                "by": user["name"],
+            },
+        )
+    elif status == "declined":
+        await notify(
+            sender,
+            {"t": "challenge_declined", "id": int(row["id"]), "by": user["name"]},
+        )
+    else:
+        await notify(target, {"t": "challenge_cancelled", "id": int(row["id"])})
+
+    asyncio.create_task(push_challenges(sender))
+    asyncio.create_task(push_challenges(target))
+    return {"id": int(row["id"]), "lobby": code, "status": status}
 
 
 @app.get("/api/config")
@@ -1185,6 +1414,9 @@ async def api_new_lobby(
     topics: str = "",
     duration: int = -1,
     bot: str = "",
+    private: int = 0,
+    key: str = "",
+    title: str = "",
 ):
     code = new_code()
     lobby = Lobby(
@@ -1193,10 +1425,53 @@ async def api_new_lobby(
         parse_ids(levels, LEVEL_IDS),
         parse_ids(topics, library.topic_ids()),
         None if duration < 0 else duration,
+        private=bool(private),
+        key=key,
+        title=title,
     )
     lobbies[code] = lobby
     seated = lobby.add_bot(bot) if bot else None
-    return {"code": code, "bot": seated.name if seated else None}
+    return {
+        "code": code,
+        "bot": seated.name if seated else None,
+        "private": lobby.private,
+        "locked": bool(lobby.key),
+    }
+
+
+@app.get("/api/lobbies")
+async def api_lobbies():
+    """The lobby browser.
+
+    Public rooms are listed in full. A private room is listed only when it has
+    a key - it shows as locked, with no way in but the key - and a private room
+    without one stays completely hidden, reachable by its invite link alone.
+    """
+    open_rooms, locked_rooms = [], []
+    for lobby in lobbies.values():
+        if not lobby.players and not lobby.watchers:
+            continue  # created but nobody has connected yet
+        if lobby.private and not lobby.key:
+            continue
+        (locked_rooms if lobby.private else open_rooms).append(lobby.listing())
+    open_rooms.sort(key=lambda r: (-r["humans"], r["code"]))
+    locked_rooms.sort(key=lambda r: r["code"])
+    return {"lobbies": open_rooms + locked_rooms, "count": len(open_rooms) + len(locked_rooms)}
+
+
+@app.post("/api/lobby/{code}/key")
+async def api_check_key(code: str, request: Request):
+    """Check a key before opening the socket, so a wrong one reads as wrong."""
+    lobby = lobbies.get(code.upper())
+    if not lobby:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if lobby.key and str(body.get("key") or "") != lobby.key:
+        return JSONResponse({"error": "bad_key"}, status_code=403)
+    return {"ok": True, "code": lobby.code}
 
 
 @app.get("/api/lobby/{code}")
@@ -1218,7 +1493,9 @@ async def api_me(request: Request):
     row = await current_user(request)
     if row is not None:
         await run_in_threadpool(db.seen, int(row["id"]), ip)
-        return {"accounts": True, "user": db.public_user(row)}
+        user = db.public_user(row)
+        user["settings"] = db.read_settings(row)
+        return {"accounts": True, "user": user}
 
     # No cookie. Re-attach to the account last seen from this IP if there is
     # one, so a cleared cookie does not strand someone's rating.
@@ -1318,6 +1595,34 @@ async def api_profile(request: Request):
     await run_in_threadpool(db.rename, uid, name)
     row = await run_in_threadpool(db.find_by_token, request.cookies[COOKIE_NAME])
     return {"user": db.public_user(row)}
+
+
+@app.get("/api/settings")
+async def api_get_settings(request: Request):
+    user = await current_user(request)
+    if user is None:
+        return {"settings": {}}
+    return {"settings": db.read_settings(user)}
+
+
+@app.post("/api/settings")
+async def api_save_settings(request: Request):
+    """Store the client preferences (theme, gutter, guides) on the account.
+
+    The browser is the source of truth while offline - localStorage is written
+    first - so this only has to make the choice survive a new device.
+    """
+    user = await current_user(request)
+    if user is None:
+        return JSONResponse({"error": "not_registered"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    saved = await run_in_threadpool(db.save_settings, int(user["id"]), body)
+    return {"settings": saved}
 
 
 @app.get("/api/name-check")
@@ -1457,6 +1762,74 @@ async def api_race(request: Request):
 
 
 # ---------- websocket ----------
+@app.websocket("/ws/user")
+async def ws_user(websocket: WebSocket):
+    """Per-account notification socket: invitations, presence, race invites.
+
+    It carries no lobby traffic. A tab holds one of these open from the moment
+    the account is known until it closes, which is also what marks the player
+    online - so the Players list and the invitation badge are both live rather
+    than polled.
+    """
+    await websocket.accept()
+
+    account = None
+    if db.enabled():
+        token = websocket.cookies.get(COOKIE_NAME, "")
+        if token:
+            account = await run_in_threadpool(db.find_by_token, token)
+    if account is None:
+        await websocket.send_text(json.dumps({"t": "error", "code": "no_account"}))
+        await websocket.close()
+        return
+
+    uid = int(account["id"])
+    ip = client_ip(websocket)
+    hub_add(uid, websocket)
+    first = len(hub.get(uid) or ()) == 1
+    mark_seen(uid, ip)
+
+    await websocket.send_text(json.dumps({"t": "ready", "uid": uid, "name": account["name"]}))
+    data = await run_in_threadpool(social.challenges_for, uid)
+    await websocket.send_text(json.dumps({"t": "challenges", **data}))
+    if first:
+        await announce_presence()
+
+    async def keepalive() -> None:
+        """Hold last_seen_at fresh and keep an idle proxy from closing us."""
+        try:
+            while True:
+                await asyncio.sleep(30)
+                mark_seen(uid, ip)
+                await websocket.send_text(json.dumps({"t": "ping"}))
+        except (asyncio.CancelledError, Exception):
+            return
+
+    beat = asyncio.create_task(keepalive())
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            kind = msg.get("t")
+            if kind == "pong":
+                continue
+            if kind == "challenges":
+                data = await run_in_threadpool(social.challenges_for, uid)
+                await websocket.send_text(json.dumps({"t": "challenges", **data}))
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        beat.cancel()
+        hub_drop(uid, websocket)
+        if uid not in hub:
+            await announce_presence()
+
+
 @app.websocket("/ws/{code}")
 async def ws_lobby(
     websocket: WebSocket,
@@ -1468,6 +1841,10 @@ async def ws_lobby(
     levels: str = Query(""),
     topics: str = Query(""),
     duration: int = Query(-1),
+    spectate: int = Query(0),
+    key: str = Query(""),
+    private: int = Query(0),
+    title: str = Query(""),
 ):
     code = code.upper()
     await websocket.accept()
@@ -1484,8 +1861,16 @@ async def ws_lobby(
             parse_ids(levels, LEVEL_IDS),
             parse_ids(topics, library.topic_ids()),
             None if duration < 0 else duration,
+            private=bool(private),
+            key=key,
+            title=title,
         )
         lobbies[code] = lobby
+    elif lobby.key and lobby.key != key:
+        # The code alone does not open a keyed lobby, however it was obtained.
+        await websocket.send_text(json.dumps({"t": "error", "code": "bad_key"}))
+        await websocket.close()
+        return
 
     pid = pid or uuid.uuid4().hex[:12]
     ip = client_ip(websocket)
@@ -1498,14 +1883,84 @@ async def ws_lobby(
             account = await run_in_threadpool(db.find_by_token, token)
     if account is not None:
         name = account["name"]
-        await run_in_threadpool(db.seen, int(account["id"]), ip)
+        mark_seen(int(account["id"]), ip)
 
     name = (name or "Guest").strip()[:18] or "Guest"
     taken = {p.name for p in lobby.players.values() if p.id != pid}
+    taken |= {w.name for w in lobby.watchers.values() if w.id != pid}
     base, suffix = name, 2
     while name in taken:
         name = base + str(suffix)
         suffix += 1
+
+    # ---- spectators ----
+    # A watcher gets the same live feed as a racer and can talk in chat, but is
+    # not in the roster, so nothing about the race or the scoring changes.
+    if spectate:
+        watcher = Player(pid, name, websocket)
+        watcher.ip = ip
+        if account is not None:
+            watcher.uid = int(account["id"])
+            watcher.avatar = (
+                int(account.get("avatar_version") or 0) if account.get("avatar_mime") else 0
+            )
+        lobby.watchers[pid] = watcher
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "t": "hello",
+                    "id": pid,
+                    "name": name,
+                    "code": code,
+                    "uid": watcher.uid,
+                    "spectator": True,
+                }
+            )
+        )
+        for msg in lobby.chat[-40:]:
+            await websocket.send_text(json.dumps(msg))
+        await lobby.push_state()
+        await lobby.system(name + " is watching")
+        asyncio.create_task(announce_lobbies())
+        try:
+            while True:
+                raw = await websocket.receive_text()
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                # Chat is the only thing a spectator may send.
+                if msg.get("t") != "chat":
+                    continue
+                text = str(msg.get("text", "")).strip()[:400]
+                if not text:
+                    continue
+                out = {
+                    "t": "chat",
+                    "name": watcher.name,
+                    "id": pid,
+                    "uid": watcher.uid,
+                    "avatar": watcher.avatar,
+                    "text": text,
+                    "watching": True,
+                    "ts": time.time(),
+                }
+                lobby.chat.append(out)
+                del lobby.chat[: -chat_limit()]
+                await lobby.broadcast(out)
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            pass
+        finally:
+            lobby.watchers.pop(pid, None)
+            if lobby.players or lobby.watchers:
+                await lobby.system(name + " stopped watching")
+                await lobby.push_state()
+            else:
+                lobby.cancel_task()
+                lobbies.pop(code, None)
+        return
 
     player = Player(pid, name, websocket)
     player.ip = ip
@@ -1528,6 +1983,8 @@ async def ws_lobby(
         await websocket.send_text(json.dumps(msg))
     await lobby.push_state()
     await lobby.system(name + " joined")
+    asyncio.create_task(announce_lobbies())
+    asyncio.create_task(announce_presence())
 
     try:
         while True:
@@ -1636,6 +2093,10 @@ async def ws_lobby(
                 if pid == lobby.host and lobby.state in ("waiting", "finished"):
                     await lobby.start_race()
 
+            elif kind == "resign":
+                # Give up: stop typing, hand the race to whoever is left.
+                await lobby.resign(player)
+
             elif kind == "progress":
                 if lobby.state != "racing" or player.finished:
                     continue
@@ -1703,9 +2164,18 @@ async def ws_lobby(
             await lobby.system(player.name + " left")
             await lobby.push_state()
             await lobby.maybe_finish()
+        elif lobby.watchers:
+            # nobody racing, but people are still watching: keep the room up
+            lobby.cancel_task()
+            lobby.state = "waiting"
+            lobby.host = None
+            await lobby.system(player.name + " left - no racers")
+            await lobby.push_state()
         else:
             lobby.cancel_task()
             lobbies.pop(code, None)
+        await announce_lobbies()
+        await announce_presence()
 
 
 @app.get("/healthz")

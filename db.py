@@ -5,6 +5,7 @@ is unreachable, `enabled()` reports False and the game keeps working without
 accounts instead of failing requests.
 """
 import hashlib
+import json
 import logging
 import os
 import queue
@@ -172,6 +173,7 @@ SCHEMA = (
         wins INT UNSIGNED NOT NULL DEFAULT 0,
         stars INT UNSIGNED NOT NULL DEFAULT 0,
         last_ip VARCHAR(45) NULL,
+        settings TEXT NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
@@ -370,6 +372,7 @@ MIGRATIONS = (
     ("cr_snippets", "author_id", "ALTER TABLE cr_snippets ADD COLUMN author_id INT UNSIGNED NULL"),
     ("cr_snippets", "status", "ALTER TABLE cr_snippets ADD COLUMN status VARCHAR(10) NOT NULL DEFAULT 'public'"),
     ("cr_snippets", "reports", "ALTER TABLE cr_snippets ADD COLUMN reports INT UNSIGNED NOT NULL DEFAULT 0"),
+    ("cr_users", "settings", "ALTER TABLE cr_users ADD COLUMN settings TEXT NULL"),
 )
 
 
@@ -568,7 +571,7 @@ def find_by_token(token: str) -> Optional[dict]:
     row = _one(
         """
         SELECT u.id, u.name, u.avatar_mime, u.avatar_version, u.races,
-               u.best_wpm, u.best_acc, u.rating, u.wins, u.stars
+               u.best_wpm, u.best_acc, u.rating, u.wins, u.stars, u.settings
         FROM cr_tokens AS t
         JOIN cr_users AS u ON u.id = t.user_id
         WHERE t.token = %s
@@ -584,7 +587,7 @@ def find_by_token(token: str) -> Optional[dict]:
     return _one(
         """
         SELECT id, name, avatar_mime, avatar_version, races, best_wpm, best_acc,
-               rating, wins, stars
+               rating, wins, stars, settings
         FROM cr_users WHERE token = %s
         """,
         (hashed,),
@@ -693,6 +696,56 @@ def get_avatar(user_id: int) -> Optional[Tuple[bytes, str]]:
     if not row or not row.get("avatar_data") or not row.get("avatar_mime"):
         return None
     return bytes(row["avatar_data"]), str(row["avatar_mime"])
+
+
+# ---------- per-account settings ----------
+# Client preferences (theme, gutter, indent guides). They live in one TEXT
+# column as JSON so a new toggle never needs another migration. The browser
+# keeps its own copy in localStorage; this is what makes the choice follow the
+# account onto another machine.
+SETTING_KEYS = ("theme", "lineNumbers", "indentGuides", "caretScroll", "sounds")
+
+
+def clean_settings(value: Any) -> Dict[str, Any]:
+    """Keep only recognised keys, so a hostile payload cannot grow the blob."""
+    if not isinstance(value, dict):
+        return {}
+    out: Dict[str, Any] = {}
+    for key in SETTING_KEYS:
+        if key not in value:
+            continue
+        item = value[key]
+        if isinstance(item, bool):
+            out[key] = item
+        elif isinstance(item, str):
+            out[key] = item[:32]
+    return out
+
+
+def read_settings(row: Optional[dict]) -> Dict[str, Any]:
+    """Decode the settings column off a user row; never raises."""
+    if not row:
+        return {}
+    raw = row.get("settings")
+    if not raw:
+        return {}
+    try:
+        return clean_settings(json.loads(raw))
+    except (TypeError, ValueError):
+        return {}
+
+
+def save_settings(user_id: int, value: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge into whatever is stored and hand back the result."""
+    current = read_settings(
+        _one("SELECT settings FROM cr_users WHERE id = %s", (user_id,))
+    )
+    current.update(clean_settings(value))
+    _exec(
+        "UPDATE cr_users SET settings = %s WHERE id = %s",
+        (json.dumps(current), user_id),
+    )
+    return current
 
 
 # ---------- activity ----------
