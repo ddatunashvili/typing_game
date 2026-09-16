@@ -452,6 +452,234 @@
     applyDisplay();
   }
 
+  /* ---------- sound ----------
+     Every sound is off until the player turns it on. Nothing is downloaded:
+     each click, buzz and jingle is synthesised with WebAudio when it plays,
+     and a little random detune keeps two keystrokes from sounding identical.
+     Stored like the display preferences - this device first, then the
+     account. */
+  const SOUND_PACKS = [
+    { id: "off", label: "Off" },
+    { id: "click", label: "Soft click" },
+    { id: "mech", label: "Mechanical" },
+    { id: "typewriter", label: "Typewriter" },
+    { id: "bubble", label: "Bubble pop" },
+    { id: "retro", label: "Retro beep" },
+  ];
+  const SOUND_IDS = SOUND_PACKS.map((p) => p.id);
+
+  const SOUND = {
+    typing: "off",   // one of SOUND_IDS
+    errors: false,   // a buzz on a missed key
+    results: false,  // a jingle when a race is won or lost
+    volume: 60,      // 0-100
+  };
+
+  const SFX = { ctx: null, noise: null, lastError: 0 };
+
+  function soundFrom(src) {
+    if (!src) return;
+    if (SOUND_IDS.indexOf(src.typingSound) >= 0) SOUND.typing = src.typingSound;
+    if (typeof src.errorSound === "boolean") SOUND.errors = src.errorSound;
+    if (typeof src.resultSound === "boolean") SOUND.results = src.resultSound;
+    const vol = parseInt(src.soundVolume, 10);
+    if (vol >= 0 && vol <= 100) SOUND.volume = vol;
+  }
+
+  function soundSettings() {
+    return {
+      typingSound: SOUND.typing,
+      errorSound: SOUND.errors,
+      resultSound: SOUND.results,
+      soundVolume: String(SOUND.volume),
+    };
+  }
+
+  function loadSound() {
+    try {
+      soundFrom(JSON.parse(localStorage.getItem("cr_sound") || "null"));
+    } catch (err) {
+      /* defaults: silence */
+    }
+  }
+
+  function saveSound() {
+    try {
+      localStorage.setItem("cr_sound", JSON.stringify(soundSettings()));
+    } catch (err) {
+      /* private mode: the account copy below is the fallback */
+    }
+    if (!S.me) return;
+    fetch("/api/settings", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(soundSettings()),
+    }).catch(() => {});
+  }
+
+  function adoptSound(settings) {
+    if (!settings) return;
+    try {
+      if (localStorage.getItem("cr_sound")) return;  // this device has already chosen
+    } catch (err) {
+      /* no local copy to prefer */
+    }
+    soundFrom(settings);
+  }
+
+  /** The shared context, created on first use. A keypress is the user gesture
+      that lets a suspended one resume. */
+  function audio() {
+    if (SFX.ctx === false || SOUND.volume <= 0) return null;
+    try {
+      if (!SFX.ctx) {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) {
+          SFX.ctx = false;
+          return null;
+        }
+        SFX.ctx = new Ctx();
+      }
+      if (SFX.ctx.state === "suspended") SFX.ctx.resume();
+      return SFX.ctx;
+    } catch (err) {
+      SFX.ctx = false;  // audio is a nicety, never a requirement
+      return null;
+    }
+  }
+
+  function noiseBuffer(ctx) {
+    if (SFX.noise) return SFX.noise;
+    const len = Math.floor(ctx.sampleRate * 0.5);
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+    SFX.noise = buf;
+    return buf;
+  }
+
+  /** A gain envelope wired to the speakers: fast attack, exponential tail. */
+  function envelope(ctx, at, peak, decay) {
+    const g = ctx.createGain();
+    const top = Math.max(0.0002, peak * (SOUND.volume / 100));
+    g.gain.setValueAtTime(0.0001, at);
+    g.gain.exponentialRampToValueAtTime(top, at + 0.002);
+    g.gain.exponentialRampToValueAtTime(0.0001, at + 0.002 + decay);
+    g.connect(ctx.destination);
+    return g;
+  }
+
+  /** Filtered noise: the click and clack of a key. */
+  function burst(ctx, at, dur, filter, freq, q, peak) {
+    const src = ctx.createBufferSource();
+    src.buffer = noiseBuffer(ctx);
+    const f = ctx.createBiquadFilter();
+    f.type = filter;
+    f.frequency.value = freq;
+    f.Q.value = q;
+    src.connect(f).connect(envelope(ctx, at, peak, dur));
+    src.start(at, Math.random() * 0.4, dur + 0.03);
+  }
+
+  /** A pitched blip, optionally sliding from one frequency to another. */
+  function tone(ctx, at, wave, from, to, dur, peak) {
+    const osc = ctx.createOscillator();
+    osc.type = wave;
+    osc.frequency.setValueAtTime(from, at);
+    if (to !== from) osc.frequency.exponentialRampToValueAtTime(to, at + dur);
+    osc.connect(envelope(ctx, at, peak, dur));
+    osc.start(at);
+    osc.stop(at + dur + 0.03);
+  }
+
+  /** kind: "key", "space", "enter" or "back". */
+  function keySound(kind, pack) {
+    pack = pack || SOUND.typing;
+    if (pack === "off") return;
+    const ctx = audio();
+    if (!ctx) return;
+    try {
+      const at = ctx.currentTime;
+      const big = kind === "space" || kind === "enter";
+      let wob = 0.92 + Math.random() * 0.16;
+      if (kind === "back") wob *= 0.85;
+      switch (pack) {
+        case "click":
+          burst(ctx, at, 0.018, "bandpass", (big ? 2300 : 3400) * wob, 1.1, 0.5);
+          break;
+        case "mech":
+          burst(ctx, at, 0.022, "bandpass", 2600 * wob, 0.9, 0.35);
+          tone(ctx, at, "sine", (big ? 120 : 190) * wob, (big ? 70 : 105) * wob,
+               big ? 0.09 : 0.055, 0.55);
+          burst(ctx, at + 0.004, 0.045, "lowpass", (big ? 450 : 700) * wob, 0.8, 0.45);
+          break;
+        case "typewriter":
+          burst(ctx, at, 0.02, "highpass", 2000 * wob, 0.7, 0.5);
+          burst(ctx, at + 0.01, 0.05, "bandpass", (big ? 600 : 950) * wob, 2.2, 0.3);
+          if (kind === "enter") {
+            tone(ctx, at + 0.06, "sine", 2093, 2093, 0.7, 0.16);
+            tone(ctx, at + 0.06, "sine", 4186, 4186, 0.35, 0.04);
+          }
+          break;
+        case "bubble":
+          tone(ctx, at, "sine", (big ? 260 : 420) * wob, (big ? 520 : 900) * wob, 0.06, 0.4);
+          break;
+        case "retro": {
+          const f = kind === "back" ? 330 : big ? 440 : 660 + Math.floor(Math.random() * 4) * 110;
+          tone(ctx, at, "square", f, f, 0.035, 0.1);
+          break;
+        }
+      }
+    } catch (err) {
+      /* a dropped click is never worth an exception mid-race */
+    }
+  }
+
+  /** A low buzz on a miss. Returns whether it played, so the caller can skip
+      the key click it replaces. */
+  function errorSound(force) {
+    if (!SOUND.errors && !force) return false;
+    const ctx = audio();
+    if (!ctx) return false;
+    const now = performance.now();
+    if (now - SFX.lastError < 70) return true;  // mashing a wrong key is not a siren
+    SFX.lastError = now;
+    try {
+      const at = ctx.currentTime;
+      tone(ctx, at, "sawtooth", 160, 110, 0.12, 0.09);
+      tone(ctx, at, "square", 163, 112, 0.12, 0.04);
+    } catch (err) {
+      /* nothing to do */
+    }
+    return true;
+  }
+
+  /** Rising major arpeggio for a win, falling minor phrase for a loss. */
+  function resultSound(won, force) {
+    if (!SOUND.results && !force) return;
+    const ctx = audio();
+    if (!ctx) return;
+    try {
+      const at = ctx.currentTime + 0.03;
+      if (won) {
+        [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => {
+          tone(ctx, at + i * 0.09, "triangle", f, f, i === 3 ? 0.55 : 0.14, 0.3);
+        });
+      } else {
+        [392, 349.23, 293.66].forEach((f, i) => {
+          tone(ctx, at + i * 0.17, "triangle", f, f, i === 2 ? 0.6 : 0.2, 0.28);
+        });
+      }
+    } catch (err) {
+      /* nothing to do */
+    }
+  }
+
+  function keyKind(ch) {
+    return ch === " " ? "space" : ch === "\n" ? "enter" : "key";
+  }
+
   const S = {
     meta: null,
     lang: localStorage.getItem("cr_lang") || "python",
@@ -877,6 +1105,7 @@
       T.pos++;
       autoSkipIndent();
       recEvent(0);
+      keySound(keyKind(ch));
       markCursor();
       scrollToCursor();
       paintSuggestion();
@@ -889,6 +1118,7 @@
     T.bad = true;
     span.classList.add("bad");
     recEvent(1);
+    if (!errorSound()) keySound(keyKind(ch));
   }
 
   function backspace() {
@@ -896,6 +1126,7 @@
       T.bad = false;
       const span = T.chars[T.pos];
       if (span) span.classList.remove("bad");
+      keySound("back");
       return;
     }
     if (T.pos === 0) return;
@@ -903,6 +1134,7 @@
     const span = T.chars[T.pos];
     span.classList.remove("done", "bad");
     recEvent(2);
+    keySound("back");
     markCursor();
     scrollToCursor();
     paintSuggestion();
@@ -944,6 +1176,7 @@
     }
     T.bad = false;
     recEvent(0);
+    keySound("space");
     markCursor();
     scrollToCursor();
     paintSuggestion();
@@ -1035,6 +1268,7 @@
     T.bad = false;
     autoSkipIndent();
     recEvent(0);
+    keySound("key");
     markCursor();
     scrollToCursor();
     paintSuggestion();
@@ -1095,6 +1329,7 @@
     showRun(earned, a, R.snips > 0);
     if (S.solo) {
       showTimedResult(w, a);
+      resultSound(true);
       recordSolo(w, a, runSeconds(), earned);
     } else {
       send({ t: "progress", p: T.pos / Math.max(1, T.code.length), wpm: w, acc: a,
@@ -1121,6 +1356,7 @@
     if (S.solo) {
       if (timed) showTimedResult(w, a);
       else showSoloResult(w, a, secs);
+      resultSound(true);
       recordSolo(w, a, secs, earned);
     } else {
       send({
@@ -1557,7 +1793,10 @@
       S.me = null;
     }
     paintProfile();
-    if (S.me && S.me.settings) adoptDisplay(S.me.settings);
+    if (S.me && S.me.settings) {
+      adoptDisplay(S.me.settings);
+      adoptSound(S.me.settings);
+    }
     if (S.accounts) loadLeaderboard();
     if (S.me) startHeartbeat();
   }
@@ -1634,6 +1873,60 @@
     }
   }
 
+  /** The sound controls. Each change applies at once and plays a sample, so
+      a player hears what they picked before closing the dialog. */
+  function wireSoundControls() {
+    const pick = el2("optTypingSound");
+    if (pick) {
+      if (!pick.options.length) {
+        for (const pack of SOUND_PACKS) {
+          const opt = document.createElement("option");
+          opt.value = pack.id;
+          opt.textContent = pack.label;
+          pick.appendChild(opt);
+        }
+      }
+      pick.value = SOUND.typing;
+      pick.onchange = () => {
+        SOUND.typing = SOUND_IDS.indexOf(pick.value) >= 0 ? pick.value : "off";
+        saveSound();
+        ["key", "key", "space", "key", "enter"].forEach((kind, i) => {
+          setTimeout(() => keySound(kind), i * 110);
+        });
+      };
+    }
+    const errors = el2("optErrorSound");
+    if (errors) {
+      errors.checked = SOUND.errors;
+      errors.onchange = () => {
+        SOUND.errors = errors.checked;
+        saveSound();
+        if (SOUND.errors) errorSound();
+      };
+    }
+    const results = el2("optResultSound");
+    if (results) {
+      results.checked = SOUND.results;
+      results.onchange = () => {
+        SOUND.results = results.checked;
+        saveSound();
+        if (SOUND.results) resultSound(true);
+      };
+    }
+    const volume = el2("optSoundVolume");
+    if (volume) {
+      volume.value = String(SOUND.volume);
+      volume.onchange = () => {
+        SOUND.volume = Math.max(5, Math.min(100, parseInt(volume.value, 10) || 60));
+        saveSound();
+        // whichever sound is on, so the level is heard; the jingle if none is
+        if (SOUND.typing !== "off") keySound("key");
+        else if (SOUND.errors) errorSound(true);
+        else resultSound(true, true);
+      };
+    }
+  }
+
   /** Country and birth-year pickers, built once and reused. */
   function fillAboutFields() {
     if (!COUNTRY_COMBO) {
@@ -1666,6 +1959,7 @@
   function openProfile() {
     renderThemes();
     wireDisplayToggles();
+    wireSoundControls();
     fillAboutFields();
     if (COUNTRY_COMBO) COUNTRY_COMBO.set((S.me && S.me.country) || "");
     el2("pfBirthYear").value = (S.me && S.me.birth_year) ? String(S.me.birth_year) : "";
@@ -2259,10 +2553,24 @@
       armRace(st.duration > 0 ? performance.now() + Math.max(0, leftMs) : null);
     }
 
+    // The race was closed on us - last call ran out while we were still typing -
+    // so no finish or resign carried the timeline. A lost run is still a run
+    // worth watching back.
+    if (!watching && me && me.finished && REC.on && prev && prev.state === "racing") {
+      const events = recTake();
+      if (events) send({ t: "replay", events });
+    }
+
     renderRacers(st);
     if (st.state === "finished") {
       renderResults(st);
       showOutcome(st);
+      // once, on the change itself: a finished lobby pushes its state again
+      // on every join, ready toggle and bot seat
+      if (!watching && me && me.finished && prev && prev.state === "racing") {
+        const rivals = st.players.some((p) => p.id !== S.pid);
+        resultSound(!rivals || me.place === 1);
+      }
       if (S.me) {
         loadLeaderboard();
         loadMe();  // the rating may have moved
@@ -4790,6 +5098,7 @@
   }
 
   loadDisplay();
+  loadSound();
   paintBackButton();
   let resizeTimer = 0;
   window.addEventListener("resize", () => {

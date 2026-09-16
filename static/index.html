@@ -984,6 +984,31 @@
       </div>
     </div>
 
+    <div class="field">
+      <span>sound</span>
+      <div class="sound-row">
+        <label for="optTypingSound">typing</label>
+        <select id="optTypingSound" class="lang-select"></select>
+      </div>
+      <div class="toggles">
+        <label class="tog">
+          <input id="optErrorSound" type="checkbox" />
+          <span>buzz on a mistake</span>
+        </label>
+        <label class="tog">
+          <input id="optResultSound" type="checkbox" />
+          <span>win and lose jingles</span>
+        </label>
+      </div>
+      <div class="sound-row">
+        <label for="optSoundVolume">volume</label>
+        <input id="optSoundVolume" type="range" min="5" max="100" step="5" value="60" />
+      </div>
+      <span class="muted">
+        All off by default. Changing one plays a sample.
+      </span>
+    </div>
+
     </div><!-- /pf-col -->
     </div><!-- /pf-grid -->
 

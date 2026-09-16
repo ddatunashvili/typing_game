@@ -179,6 +179,15 @@ the first paint (so there is no flash of the previous theme) and mirrored onto y
 so it follows you to another machine. A device that has already chosen keeps its own
 choice; the account copy only seeds a device that has not.
 
+## Sound
+
+Off by default. The profile dialog has a **sound** section: a typing sound (soft click,
+mechanical, typewriter - with the carriage-return bell on Enter - bubble pop or retro beep),
+a buzz on a mistake, a jingle when you win or lose, and a volume slider. Every sound is
+synthesised with WebAudio as it plays, so nothing is downloaded, and each keystroke is
+slightly detuned so a run does not sound like one click on a loop. Changing a control plays a
+sample. Stored like the theme: on this device first, then on the account.
+
 ## Giving up
 
 **Give up** appears while you are racing. It stops your run without ending the race for
@@ -190,7 +199,8 @@ that last place earns.
 
 Every race is recorded: each accepted key, miss and backspace as a
 `[ms, pos, idx, flag]` row against the moment the race armed - a few KB per
-run. The timeline goes up with the result, lobby or solo, and is stored with
+run. The timeline goes up with the result, lobby or solo, won or lost - a racer still
+typing when the last call closes the race sends theirs the moment it does - and is stored with
 the snippets it was typed on, because the library changes and a replay against
 an edited snippet would play back nonsense.
 
@@ -508,7 +518,7 @@ Accounts (all no-ops when no database is configured):
 - `GET /api/bot-avatar/{slug}` — bot portrait (imported artwork, else a generated identicon)
 - `GET /api/bot-card/{slug}` — the full bot character-card illustration
 - `GET /api/name-check?name=x` — is this display name free, plus suggestions if not
-- `GET|POST /api/settings` — client preferences (theme, gutter, guides) stored on the
+- `GET|POST /api/settings` — client preferences (theme, gutter, guides, sounds) stored on the
   account, so they follow the player to another machine
 - `POST /api/profile` `{name, country, birth_year, gender}` — rename and set the optional
   published details; a missing or unusable value clears that field
@@ -542,7 +552,7 @@ Client → server: `chat`, `ready`, `start`, `restart`, `again`, `lang`, `filter
 `duration`, `mode`, `bot`, `unbot`, `progress`, `finish`, `resign`, `replay` — `mode`
 sets `strict`, `ranked`, `suggest` and `limit` (host only, before the start); `finish` and
 `resign` carry the keystroke timeline as `replay`, and `replay` sends it on its own when the
-clock ended the race; `again` swaps the snippet,
+clock or the last call ended the race; `again` swaps the snippet,
 `restart` starts another race, `bot`/`unbot` seat and remove a bot (host only), `resign`
 gives up without ending the race. With `spectate=1` the connection watches instead of
 racing and only `chat` is accepted from it.

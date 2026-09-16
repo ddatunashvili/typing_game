@@ -1894,7 +1894,7 @@ async def api_get_settings(request: Request):
 
 @app.post("/api/settings")
 async def api_save_settings(request: Request):
-    """Store the client preferences (theme, gutter, guides) on the account.
+    """Store the client preferences (theme, gutter, guides, sounds) on the account.
 
     The browser is the source of truth while offline - localStorage is written
     first - so this only has to make the choice survive a new device.
@@ -2496,8 +2496,8 @@ async def ws_lobby(
                     await lobby.start_race()
 
             elif kind == "replay":
-                # The timeline on its own: sent when the clock ended the race
-                # or the player gave up, so nothing else carried it.
+                # The timeline on its own: sent when the clock or the last call
+                # ended the race, so nothing else carried it.
                 player.replay = db.clean_replay(msg.get("events"))
                 await lobby.keep_replay(player)
 

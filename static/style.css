@@ -1671,6 +1671,10 @@ body.spectating .code-area .ch.cur::after { display: none; }
 }
 .tog input { width: 15px; height: 15px; accent-color: var(--accent); }
 .tog:hover { color: var(--text); }
+.sound-row { display: flex; align-items: center; gap: 10px; margin-top: 2px; }
+.sound-row label { min-width: 52px; }
+.sound-row select { flex: 1 1 auto; min-width: 0; }
+.sound-row input[type="range"] { flex: 1 1 auto; min-width: 0; accent-color: var(--accent); }
 
 /* ---------- notices ---------- */
 .flash-note {

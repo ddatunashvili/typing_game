@@ -962,11 +962,21 @@ def get_replay(post_id: int) -> Optional[dict]:
 
 
 # ---------- per-account settings ----------
-# Client preferences (theme, gutter, indent guides). They live in one TEXT
-# column as JSON so a new toggle never needs another migration. The browser
-# keeps its own copy in localStorage; this is what makes the choice follow the
-# account onto another machine.
-SETTING_KEYS = ("theme", "lineNumbers", "indentGuides", "caretScroll", "sounds")
+# Client preferences (theme, gutter, indent guides, sounds). They live in one
+# TEXT column as JSON so a new toggle never needs another migration. The
+# browser keeps its own copy in localStorage; this is what makes the choice
+# follow the account onto another machine.
+SETTING_KEYS = (
+    "theme",
+    "lineNumbers",
+    "indentGuides",
+    "caretScroll",
+    "sounds",
+    "typingSound",
+    "errorSound",
+    "resultSound",
+    "soundVolume",
+)
 
 
 def clean_settings(value: Any) -> Dict[str, Any]:
