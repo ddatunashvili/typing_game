@@ -305,10 +305,7 @@ layout does not jump when one appears.
 | `outputs.py` | demo transcripts for the simulated run panel |
 | `tools/make_assets.py` | regenerates the OG card and icons |
 | `tools/import_bot_avatars.py` | imports bot artwork from a zip or folder |
-| `deploy/nginx-coderace.conf` | vhost for the primary domain: TLS, WebSocket upgrade, caching |
-| `deploy/nginx-typing.conf` | the same vhost for the second domain |
-| `deploy/nginx-typing-redirect.conf` | use instead, to 301 the second domain at the first |
-| `tools/make_nginx.py` | fills the templates in, into gitignored `deploy/local/` |
+| `nginx/` | one vhost file per domain (gitignored: they hold the container address) |
 
 ## API
 
@@ -475,15 +472,10 @@ now, so a single missing element warns instead of aborting the rest of the scrip
 
 ### Reverse proxy
 
-One self-contained vhost file per domain in `deploy/`, with placeholders for the domain and
-the container's address. Fill them in with:
-
-```bash
-python tools/make_nginx.py --primary coderace.example.com     --second typing.example.com --backend 10.0.0.5:8000
-```
-
-That writes ready-to-paste files into `deploy/local/`, which is gitignored so the backend
-address stays out of the repository. Paste one per vhost, then `nginx -t` and reload.
+One self-contained vhost file per domain lives in `nginx/`. That folder is gitignored,
+because each file contains the container's real address and publishing it would let people
+bypass nginx and TLS and hit the app directly. Paste one file per vhost, then `nginx -t`
+and reload.
 
 The parts that matter:
 
@@ -500,3 +492,6 @@ The parts that matter:
 - `X-Forwarded-For` — the source of the stored client IP.
 - `proxy_read_timeout 3600s` — lobbies hold a socket open while idle.
 - `client_max_body_size 2m` — headroom over the 512 KB avatar cap.
+- **`listen 443 ssl http2;`** — the form every nginx accepts. On 1.25.1 and newer it logs a
+  deprecation notice and may be split into `listen 443 ssl;` plus `http2 on;`, but
+  `http2 on;` is an *unknown directive* on anything older and nginx rejects the whole file.
